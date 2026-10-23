@@ -17,6 +17,12 @@ static class RecorderWorker
 
     public static int Run(string[] args)
     {
+        if (!AppPaths.TryInitialize(args))
+        {
+            Send("failed", $"Bad arguments: {AppPaths.DataDirFlag} is required");
+            return 2;
+        }
+
         RecordingTarget target;
         try
         {
@@ -102,7 +108,7 @@ static class RecorderWorker
         string args = target.WindowHandle != IntPtr.Zero
             ? $"{Flag} --window {target.WindowHandle.ToInt64()}"
             : $"{Flag} --display \"{target.DisplayDeviceName}\"";
-        args += $" --name \"{target.Name.Replace("\"", "'")}\"";
+        args += $" --name \"{target.Name.Replace("\"", "'")}\" {AppPaths.Argument}";
         return skipGraphicsCapture ? args + " --crop" : args;
     }
 

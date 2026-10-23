@@ -1,9 +1,9 @@
 @echo off
-rem Double-click to install Meeting Recorder for this account from the latest published build.
-rem Run once per account; after that the app updates itself. Re-running repairs the install.
+rem Installs the build in dist\ for this account, starts it at sign-in and starts it now.
+rem Run build.cmd first. Re-running it is safe.
 rem   install.cmd /quiet            no pause at the end
 rem   install.cmd /quiet -NoStart   install without starting
-rem   install.cmd /quiet -Force     also while a recording is in progress (it is saved and ends)
+rem   install.cmd /quiet -Force     close the app even while recording (the recording is saved and ends)
 set "HERE=%~dp0"
 set "QUIET="
 if /i "%~1"=="/quiet" (

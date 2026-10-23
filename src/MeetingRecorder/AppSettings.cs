@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace MeetingRecorder;
 
 /// <summary>
-/// User choices persisted between runs in %APPDATA%\MeetingRecorder\settings.json.
+/// User choices persisted between runs in settings.json in the data folder.
 /// </summary>
 sealed class AppSettings
 {
@@ -12,9 +12,6 @@ sealed class AppSettings
 
     /// <summary>Audio device id meaning "don't record this source".</summary>
     public const string DisabledDevice = "off";
-
-    public static readonly string SettingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MeetingRecorder", "settings.json");
 
     private static readonly string DefaultRecordingsRoot = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Meeting Recordings");
@@ -64,12 +61,12 @@ sealed class AppSettings
         error = null;
         try
         {
-            if (File.Exists(SettingsPath))
-                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
+            if (File.Exists(AppPaths.SettingsPath))
+                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(AppPaths.SettingsPath)) ?? new AppSettings();
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
-            error = $"Settings could not be read ({SettingsPath}): {ex.Message}. Using defaults; the file was left as it is.";
+            error = $"Settings could not be read ({AppPaths.SettingsPath}): {ex.Message}. Using defaults; the file was left as it is.";
         }
         return new AppSettings();
     }
@@ -77,7 +74,7 @@ sealed class AppSettings
     /// <summary>Writes the settings file. Throws on I/O failure.</summary>
     public void Save()
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        Directory.CreateDirectory(Path.GetDirectoryName(AppPaths.SettingsPath)!);
+        File.WriteAllText(AppPaths.SettingsPath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }
 }

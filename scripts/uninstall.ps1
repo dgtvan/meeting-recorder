@@ -3,44 +3,91 @@
     Removes Meeting Recorder for the current account.
 
 .DESCRIPTION
-    Follows the App deployment standard v1.2, section 6 (https://github.com/dgtvan/local-app-deployment-strategy).
-    Stops the app, removes the start-at-sign-in entry, Start Menu shortcut, Settings > Apps entry, install folder
-    and this account's pickup folder. Settings, logs and recordings are kept unless asked otherwise.
-    A copy of this script lives in the install folder, so Settings > Apps can run it without the repo.
+    Follows the App deployment standard v2.1, section 3.3 (https://github.com/dgtvan/local-app-deployment-strategy).
+    Stops the app, removes the start-at-sign-in entry, the Start Menu shortcut and %LOCALAPPDATA%\MeetingRecorder\app.
+    Settings, logs (%LOCALAPPDATA%\MeetingRecorder\data) and recordings are never deleted. Succeeds and does nothing
+    when the app isn't installed.
 
-    Exit codes: 0 removed, 1 error, 3 refused because a recording is in progress.
+    Exit codes: 0 removed, 1 error, 3 refused because the app is busy (a recording is starting, running or saving)
+    or didn't answer the close request.
 
-.PARAMETER RemoveData
-    Also remove settings (%APPDATA%\MeetingRecorder) and local data (%LOCALAPPDATA%\MeetingRecorder).
-
-.PARAMETER RemoveRecordings
-    Also remove the recordings folder.
+.PARAMETER NoDataWarning
+    Don't print where the data was kept (used by deploy.ps1, which installs again right away).
 
 .PARAMETER Force
-    Uninstall even while a recording is in progress. The recording is saved and ends.
+    Close the app even while recording. The recording is saved and ends.
 #>
-param([switch]$RemoveData, [switch]$RemoveRecordings, [switch]$Force)
+param([switch]$NoDataWarning, [switch]$Force)
 
 $ErrorActionPreference = 'Stop'
 
-$AppId        = 'MeetingRecorder'
-$AppName      = 'Meeting Recorder'
-$ExeName      = "$AppId.exe"
-$InstallDir   = Join-Path $env:LOCALAPPDATA "Programs\$AppId"
-$SettingsDir  = Join-Path $env:APPDATA $AppId
-$LocalDataDir = Join-Path $env:LOCALAPPDATA $AppId
-$RunKey       = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppId"
-$Shortcut     = Join-Path ([Environment]::GetFolderPath('Programs')) "$AppName.lnk"
+$AppId    = 'MeetingRecorder'
+$AppName  = 'Meeting Recorder'
+$ExeName  = "$AppId.exe"
+$Root     = Join-Path $env:LOCALAPPDATA $AppId
+$AppDir   = Join-Path $Root 'app'
+$DataDir  = Join-Path $Root 'data'
+$RunKey   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$Shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) "$AppName.lnk"
 
 function Write-Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
 
-# Read these before the install folder and settings are removed.
-$publishRoot = "D:\Apps\$AppId"
-$sourceFile = Join-Path $InstallDir 'update-source.txt'
-if (Test-Path $sourceFile) { $publishRoot = (Get-Content $sourceFile -Raw).Trim() }
+# Standard section 3.5: ask the app to close, and let it refuse while it is busy.
+function Stop-App {
+    # This account's processes only; --teams-status is a short diagnostic run.
+    $own = @(Get-CimInstance Win32_Process -Filter "Name = '$ExeName'" | Where-Object {
+        $_.CommandLine -notmatch '--teams-status' -and
+            (Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User -eq $env:USERNAME
+    })
+    if ($own.Count -eq 0) { return }
+
+    Write-Step 'Asking Meeting Recorder to close'
+    $refused = $null
+    try {
+        $refused = [Threading.EventWaitHandle]::OpenExisting("Local\$AppId-ExitRefused")
+        $null = $refused.Reset()
+        $exit = [Threading.EventWaitHandle]::OpenExisting("Local\$AppId-Exit")
+        $null = $exit.Set()
+        $exit.Dispose()
+    } catch {
+        # An app from before standard v2.1 has no close events; it counts as not answering.
+    }
+    $answer = 'none'
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Id $own.ProcessId -ErrorAction SilentlyContinue)) { $answer = 'closed'; break }
+        if ($refused -and $refused.WaitOne(250)) { $answer = 'refused'; break }
+        if (-not $refused) { Start-Sleep -Milliseconds 250 }
+    }
+    if ($refused) { $refused.Dispose() }
+    if ($answer -eq 'closed') { return }
+
+    if (-not $Force) {
+        if ($answer -eq 'refused') {
+            Write-Host "$AppName is busy (a recording is starting, running or saving). Let it finish or stop it, then run this again, or use -Force (the recording is saved and ends)." -ForegroundColor Yellow
+        } else {
+            Write-Host "$AppName did not answer the close request within 10 s. Exit it from the tray menu, then run this again, or use -Force." -ForegroundColor Yellow
+        }
+        exit 3
+    }
+
+    Write-Step "Closing $AppName (-Force)"
+    # Killing the tray process ends a recording safely: the worker sees its stdin close, saves the files and exits.
+    $workers = @($own | Where-Object { $_.CommandLine -match '--record' })
+    $own | Where-Object { $_.CommandLine -notmatch '--record' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    if ($workers.Count -gt 0) {
+        Write-Step 'Waiting for the recording to be saved'
+        Wait-Process -Id $workers.ProcessId -Timeout 600 -ErrorAction SilentlyContinue
+        if (Get-Process -Id $workers.ProcessId -ErrorAction SilentlyContinue) {
+            throw 'The recording is still being saved after 10 minutes. Nothing was changed; run this again later.'
+        }
+    }
+}
+
+# Read before anything is removed: where the recordings go.
 $recordingsRoot = Join-Path ([Environment]::GetFolderPath('MyVideos')) 'Meeting Recordings'
-$settingsFile = Join-Path $SettingsDir 'settings.json'
+$settingsFile = Join-Path $DataDir 'settings.json'
 if (Test-Path $settingsFile) {
     try {
         $configured = (Get-Content $settingsFile -Raw | ConvertFrom-Json).RecordingsRoot
@@ -48,49 +95,30 @@ if (Test-Path $settingsFile) {
     } catch { }
 }
 
-# 1. Stop this account's copy. Only this account's processes expose their command line.
-$own = @(Get-CimInstance Win32_Process -Filter "Name = '$ExeName'" | Where-Object { $_.CommandLine })
-if ($own.Count -gt 0) {
-    $recording = @($own | Where-Object { $_.CommandLine -match '--record' })
-    if ($recording.Count -gt 0 -and -not $Force) {
-        Write-Host 'A recording is in progress. Stop it first, or run again with -Force (the recording is saved and ends).' -ForegroundColor Yellow
-        exit 3
-    }
-    Write-Step 'Stopping the app'
-    # Closing the tray process ends a recording safely: the worker sees its stdin close, saves the files and exits.
-    $own | Where-Object { $_.CommandLine -notmatch '--record' } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    $recording | ForEach-Object { Wait-Process -Id $_.ProcessId -Timeout 60 -ErrorAction SilentlyContinue }
-}
+# 1. Stop
+Stop-App
 
-# 2. Registration, including legacy startup entries
-Write-Step 'Removing start at sign-in, Start Menu shortcut and Settings > Apps entry'
+# 2. Registration, including entries from earlier install methods
 Remove-ItemProperty $RunKey -Name $AppId -ErrorAction SilentlyContinue
 Remove-Item $Shortcut -Force -ErrorAction SilentlyContinue
-Remove-Item $UninstallKey -Recurse -Force -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $AppId -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) "$AppName.lnk") -Force -ErrorAction SilentlyContinue
 
-# 3. Install folder. This script may be running from it; PowerShell has already read it, so deleting is safe.
-Write-Step "Removing $InstallDir"
-Set-Location $env:TEMP
-Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-
-# 4. Data, only when asked
-if ($RemoveData) {
-    Write-Step 'Removing settings and local data'
-    Remove-Item $SettingsDir -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $LocalDataDir -Recurse -Force -ErrorAction SilentlyContinue
+# 3. App folder, and the root folder when nothing else is left in it
+if (Test-Path $AppDir) {
+    Write-Step "Removing $AppDir"
+    Remove-Item $AppDir -Recurse -Force
 }
-if ($RemoveRecordings) {
-    Write-Step "Removing recordings in $recordingsRoot"
-    Remove-Item $recordingsRoot -Recurse -Force -ErrorAction SilentlyContinue
+if ((Test-Path $Root) -and -not (Get-ChildItem $Root -Force)) { Remove-Item $Root -Force }
+
+# 4. Data is kept
+if (-not $NoDataWarning) {
+    Write-Host "$AppName has been uninstalled." -ForegroundColor Green
+    if (Test-Path $DataDir) {
+        Write-Host "WARNING: $AppName data was kept in $DataDir" -ForegroundColor Yellow
+        Write-Host "         Delete that folder yourself if you no longer need it." -ForegroundColor Yellow
+    }
+    if (Test-Path $recordingsRoot) {
+        Write-Host "WARNING: Recordings were kept in $recordingsRoot" -ForegroundColor Yellow
+    }
 }
-
-# 5. This account's pickup folder, so publishing stops waiting for it
-Remove-Item (Join-Path $publishRoot "pickup\$env:USERNAME") -Recurse -Force -ErrorAction SilentlyContinue
-
-Write-Host ''
-Write-Host 'Meeting Recorder has been uninstalled.' -ForegroundColor Green
-if (-not $RemoveData) { Write-Host "Settings were kept in $SettingsDir (use -RemoveData to remove them)." }
-if (-not $RemoveRecordings -and (Test-Path $recordingsRoot)) { Write-Host "Recordings were kept in $recordingsRoot." }

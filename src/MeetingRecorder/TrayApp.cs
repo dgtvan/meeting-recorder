@@ -50,18 +50,19 @@ sealed class TrayApp : ApplicationContext
     private IntPtr _autoWindow;
     private int _spinnerFrame;
     private readonly List<string> _problems = [];
-    private readonly SelfUpdater _updater = new();
+    private readonly EventWaitHandle _exitRequest = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-Exit");
+    private readonly EventWaitHandle _exitRefused = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-ExitRefused");
     private readonly SynchronizationContext _ui;
     private State _state = State.Idle;
     private DateTime _stateSince = DateTime.UtcNow;
     private bool _lowDiskReported;
-    private string? _failedBuildReported;
     private RecordingProcess? _session;
     private string? _lastFolder;
     private bool _exitAfterStop;
 
     public TrayApp()
     {
+        List<string> dataProblems = AppInitializer.PrepareDataFolder();
         _settings = AppSettings.Load(out string? settingsLoadError);
         _menu = new ContextMenuStrip();
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
@@ -147,14 +148,17 @@ sealed class TrayApp : ApplicationContext
             _spinnerFrame = (_spinnerFrame + 1) % TrayIcons.Processing.Length;
             RefreshIcon();
         };
-        _updater.BuildsChanged += () => _ui.Post(_ => CheckForUpdate(), null);
         Application.ThreadException += (_, e) => AddProblem($"Unexpected error: {e.Exception.Message}");
 
         SetState(State.Idle);
-        foreach (string problem in AppInitializer.Run(_settings, settingsLoadError))
+        foreach (string problem in dataProblems.Concat(AppInitializer.Run(_settings, settingsLoadError)))
             AddProblem(problem);
-        // Also picks up a build published while the app wasn't running, and reports state at startup.
-        _ui.Post(_ => CheckForUpdate(), null);
+
+        new Thread(() =>
+        {
+            while (_exitRequest.WaitOne())
+                _ui.Post(_ => OnExitRequested(), null);
+        }) { IsBackground = true, Name = "Exit request listener" }.Start();
     }
 
     private void SetState(State state)
@@ -217,7 +221,6 @@ sealed class TrayApp : ApplicationContext
             "Meeting Recorder: needs attention", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         _problems.Clear();
         RefreshIcon();
-        CheckForUpdate();
     }
 
     private void CheckHealth()
@@ -520,50 +523,23 @@ sealed class TrayApp : ApplicationContext
         else if (_problems.Count == 0)
             ShowBalloon("Recording saved",
                 Join(session.EndNote ?? "", "Click to open " + Path.GetFileName(session.FolderPath ?? "")), ToolTipIcon.Info);
-        CheckForUpdate();
     }
 
     /// <summary>
-    /// Installs the latest published build when it differs from this one (newer, or older after a rollback),
-    /// but never during a recording. Unread warnings don't hold it back: they are logged and belong to the session
-    /// that raised them (often the update is the fix). A build whose install already failed is not retried, so a
-    /// broken build can't cause a restart loop.
+    /// Answers a close request from install/uninstall (App deployment standard v2.1, section 4.4): exits when idle;
+    /// while a recording is starting, running or saving it refuses and carries on.
     /// </summary>
-    private void CheckForUpdate()
+    private void OnExitRequested()
     {
-        if (!_updater.IsEnabled)
-            return;
-        string? latest = _updater.FindLatestBuild();
-        if (latest == null || latest == _updater.InstalledBuildId)
+        if (_state == State.Idle)
         {
-            _updater.WriteState("running");
-            return;
-        }
-        if (_updater.LastAttemptId == latest)
-        {
-            _updater.WriteState($"failed: build {latest} did not install");
-            if (_failedBuildReported != latest)
-            {
-                _failedBuildReported = latest;
-                AddProblem($"Update {latest} could not be installed. Run install.cmd to repair the install.");
-            }
-            return;
-        }
-        if (_state != State.Idle)
-        {
-            _updater.WriteState($"waiting: build {latest} until the recording in progress ends");
-            return;
-        }
-        try
-        {
-            _updater.LaunchUpdate(latest);
             ExitNow();
+            return;
         }
-        catch (Exception ex)
-        {
-            _updater.WriteState($"failed: build {latest}: {ex.Message}", latest);
-            AddProblem($"Could not install update {latest}: {ex.Message}");
-        }
+        _exitRefused.Set();
+        ShowBalloon("Install postponed",
+            "An install tried to close Meeting Recorder while recording and was refused. Run it again once the recording is saved.",
+            ToolTipIcon.Info);
     }
 
     private void Exit()
@@ -582,7 +558,6 @@ sealed class TrayApp : ApplicationContext
         _watchdog.Dispose();
         _spinner.Dispose();
         _teamsTimer.Dispose();
-        _updater.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
         _menu.Dispose();

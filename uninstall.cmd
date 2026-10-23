@@ -1,9 +1,7 @@
 @echo off
-rem Double-click to uninstall Meeting Recorder for this account. Settings and recordings are kept.
-rem   uninstall.cmd /quiet                     no pause at the end
-rem   uninstall.cmd -RemoveData                also remove settings and local data
-rem   uninstall.cmd -RemoveRecordings          also remove the recordings
-rem   uninstall.cmd -Force                     also while a recording is in progress (it is saved and ends)
+rem Removes Meeting Recorder for this account. Settings, logs and recordings are kept.
+rem   uninstall.cmd /quiet          no pause at the end
+rem   uninstall.cmd /quiet -Force   close the app even while recording (the recording is saved and ends)
 set "HERE=%~dp0"
 set "QUIET="
 if /i "%~1"=="/quiet" (

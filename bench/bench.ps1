@@ -3,8 +3,8 @@
 Records a video file through MeetingRecorder's encoder settings and reports CPU, GPU, RAM, save time and file sizes.
 
 .DESCRIPTION
-Uses the worker's --file source, so nothing is captured from the screen. Writes a temporary settings.json for the
-run and restores the previous one afterwards. Audio sources are off unless given: pass the id of an output
+Uses the worker's --file source, so nothing is captured from the screen. Uses a temporary data folder with its own
+settings.json, removed afterwards. Audio sources are off unless given: pass the id of an output
 device nothing plays to as -SystemAudio to measure audio without recording anyone ("" = Windows default). The recording folder is left in place; delete it when done.
 CPU and GPU include decoding the source file, so compare them between runs rather than reading them as absolute.
 
@@ -23,9 +23,9 @@ param(
     [string]$Microphone = 'off'
 )
 
-$settingsPath = Join-Path $env:APPDATA 'MeetingRecorder\settings.json'
-$backup = if (Test-Path $settingsPath) { Get-Content -Raw $settingsPath } else { $null }
-New-Item -ItemType Directory -Force (Split-Path $settingsPath) | Out-Null
+$dataDir = Join-Path $env:TEMP "MeetingRecorder-bench-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$settingsPath = Join-Path $dataDir 'settings.json'
+New-Item -ItemType Directory -Force $dataDir | Out-Null
 $settings = [ordered]@{
     SchemaVersion = 1; MaxVideoHeight = $MaxHeight; CompressAudio = [bool]::Parse($Compress); VideoQuality = $Quality
     SystemAudioDeviceId = $SystemAudio; MicrophoneDeviceId = $Microphone; AutoRecordTeams = $false
@@ -34,7 +34,7 @@ Set-Content -Path $settingsPath -Value ($settings | ConvertTo-Json)
 
 try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo (Resolve-Path $Exe)
-    $psi.Arguments = "--record --file `"$(Resolve-Path $Source)`" --name bench-$Label"
+    $psi.Arguments = "--record --file `"$(Resolve-Path $Source)`" --name bench-$Label --data-dir `"$dataDir`""
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
@@ -79,5 +79,5 @@ try {
     "  folder: $folder"
 }
 finally {
-    if ($null -ne $backup) { Set-Content -Path $settingsPath -Value $backup -NoNewline } else { Remove-Item $settingsPath }
+    Remove-Item $dataDir -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -1,15 +1,14 @@
 namespace MeetingRecorder;
 
 /// <summary>
-/// Every warning the tray shows, appended to %LOCALAPPDATA%\MeetingRecorder\warnings.log, so a warning isn't lost
+/// Every warning the tray shows, appended to warnings.log in the data folder, so a warning isn't lost
 /// when the app restarts (each start begins with no warnings; earlier ones belong to the previous session).
 /// </summary>
 static class WarningLog
 {
     private const long MaxBytes = 1 << 20;
 
-    public static readonly string LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MeetingRecorder", "warnings.log");
+    public static string LogPath => AppPaths.WarningLogPath;
 
     /// <summary>Appends one entry; logging problems are ignored so they never hide the warning itself.</summary>
     public static void Append(string text)

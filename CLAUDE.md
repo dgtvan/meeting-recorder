@@ -5,46 +5,42 @@ See README.md for features and design. `<AppId>` is `MeetingRecorder`.
 
 ## Deployment
 
-This app follows the App deployment standard v1.2
-(https://github.com/dgtvan/local-app-deployment-strategy). The agent runs as a separate Windows account and
-cannot touch a user's install directly; each user's running app installs new builds from D:\Apps\MeetingRecorder by itself.
+This app follows the App deployment standard v2.1
+(https://github.com/dgtvan/local-app-deployment-strategy).
 
-After every change to the app that builds cleanly, publish it (sandbox disabled):
+After every change to the app that builds cleanly, deploy it (sandbox disabled):
 
-    cmd //c 'D:\Src\Personal\meeting-recorder\publish.cmd /quiet'
+    cmd //c 'D:\Src\Personal\meeting-recorder\deploy.cmd /quiet'
 
-It prints one line per account. Report the result in one line by exit code: 0 updated and running ·
-5 waiting until the app is idle · 6 an app didn't answer, it installs on next start · 7 an app failed to install
-it (show output) · 1 error (show output).
+Report the result in one line by exit code: 0 installed and running · 3 the app is busy, ask the user to close
+it and run again · 1 error (show output). Never pass -Force unless the user asks.
 
-To withdraw a bad build, delete its folder under D:\Apps\MeetingRecorder\builds\; apps go back to the previous one.
-Deleting only its `build-id.txt` has the same effect (publishing removes the leftover folder after an hour).
-
-Never run install.cmd or start the exe from the agent account (except for the tests in the standard): it creates
-a separate copy under the agent account instead of updating the user's app. The user runs install.cmd once
-themselves; after that, publishing is all an update needs. Never pass -Force.
+Deploy installs for the account that runs it. If `whoami` isn't the account that uses the app (the user's own
+account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `deploy.cmd` from their account.
 
 ## App specifics
 
-- "Busy" (updates wait, install/uninstall refuse with exit 3) = a recording is starting, running or saving.
+- "Busy" (install/uninstall/deploy refuse with exit 3) = a recording is starting, running or saving.
   A recording runs in a child process (`MeetingRecorder.exe --record ...`) that saves and exits when its stdin closes.
-- Startup initialization (standard 7.1) is `AppInitializer`; settings migrations go there, keyed on `SchemaVersion`.
-- Self-update (standard 7.3–7.5) is `SelfUpdater` plus `TrayApp.CheckForUpdate`.
+- Every mode except `--teams-status` needs `--data-dir <folder>` (`AppPaths`); the tray passes it to the worker.
+- Startup initialization (standard 4.2) is `AppInitializer`; settings migrations go there, keyed on `SchemaVersion`.
+- Close requests (standard 3.5, 4.4) are answered in `TrayApp.OnExitRequested`.
 
 ## Testing
 
-- Recording logic can be exercised without the tray: `MeetingRecorder.exe --record --display "\\.\DISPLAY1" --name fullscreen`
+- Recording logic can be exercised without the tray: `MeetingRecorder.exe --record --display "\\.\DISPLAY1" --name fullscreen --data-dir <scratch folder>`
   (or `--window <hwnd>`) from `src/MeetingRecorder/bin/`, then write `stop` to stdin. It prints `folder`, `started`,
   `warning`, `finished`/`failed` lines. Recordings go to the agent account's own Videos folder.
 - Window capture (Windows Graphics Capture) isn't available from the agent account, so `--window` falls back to a
   cropped display capture, which records whatever covers the window, including the user's own work. For performance
-  tests use `--record --file <video> --name <n>` instead: it replays a video file through the same encoder settings
+  tests use `--record --file <video> --name <n> --data-dir <scratch folder>` instead: it replays a video file through the same encoder settings
   and captures nothing from the screen. `bench/make-test-video.ps1` makes the test video and `bench/bench.ps1`
   measures a run; log results in docs/performance.md. Delete test recordings afterwards.
 - `MeetingRecorder.exe --teams-status` prints whether a Teams call is active and which window auto-record would use.
   It captures nothing, and works from the agent account because it shares the user's desktop and audio devices.
-- Publishing while the user is in a Teams call makes the updated app start recording that call (it updates whenever
-  it's idle). Check `--teams-status` first and wait for `call none`, unless the user says otherwise.
-- Deployment tests: section 11 of the standard, with a throwaway install under the agent account, removed afterwards
-  with `uninstall.cmd /quiet -RemoveData`.
+- Deploying while the user is in a Teams call makes the new app start recording that call. Check `--teams-status`
+  first and wait for `call none`, unless the user says otherwise.
+- Deployment tests: section 8 of the standard. From an account other than the user's, don't start the tray: its
+  `Local\` mutex and events are shared with the user's session, and auto-record could capture their screen. Use
+  `install.cmd /quiet -NoStart` and `uninstall.cmd /quiet`, which only touch the agent account.
 - Delete files with `~/.claude/.addons/utilities/file-helper/dist/file-helper.exe delete <file>`; `rm` is blocked.

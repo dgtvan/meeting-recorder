@@ -15,7 +15,7 @@ static class Program
         }
         if (args.Length > 0 && args[0] == "--teams-status")
         {
-            // Diagnostic: what Teams auto-record would see right now. Captures nothing.
+            // Diagnostic: what Teams auto-record would see right now. Captures nothing and needs no data folder.
             Console.Out.WriteLine(TeamsMeeting.IsCallActive() ? "call active" : "call none");
             Console.Out.WriteLine(TeamsMeeting.FindMeetingWindow() is { } window ? $"window {window.Handle} {window.Title}" : "window none");
             return 0;
@@ -23,13 +23,16 @@ static class Program
 
         using var mutex = new Mutex(true, @"Local\MeetingRecorder-SingleInstance", out bool isFirstInstance);
         if (!isFirstInstance)
-        {
-            MessageBox.Show("Meeting Recorder is already running in the system tray.", "Meeting Recorder",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 0;
-        }
 
         ApplicationConfiguration.Initialize();
+        if (!AppPaths.TryInitialize(args))
+        {
+            MessageBox.Show("Meeting Recorder was started without --data-dir. Start it from the Start Menu shortcut.",
+                "Meeting Recorder", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+
         // Errors in UI callbacks become a tray warning instead of a crash.
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.Run(new TrayApp());

@@ -40,7 +40,7 @@ recording) only when you need to do something, and stays that way until you look
 Windows notifications are muted. Open it from the bold *Needs attention* item at the top of the menu,
 by double-clicking the icon, or by clicking the notification. Closing the details clears the warning.
 
-Every warning is also appended to `%LOCALAPPDATA%\MeetingRecorder\warnings.log` (*Open warnings log* in the menu;
+Every warning is also appended to `warnings.log` in the data folder (*Open warnings log* in the menu;
 rolled over to `warnings.old.log` at 1 MB). Warnings belong to one run of the app: a restart, including an update,
 starts with none, and the log keeps the earlier ones.
 
@@ -98,7 +98,10 @@ Minimized windows are restored when recording starts.
 
 ## Settings
 
-`%APPDATA%\MeetingRecorder\settings.json`, created with defaults when the app first starts:
+`%LOCALAPPDATA%\MeetingRecorder\data\settings.json` (the data folder given by `--data-dir`), created with defaults when
+the app first starts. On the first start with an empty data folder, the app copies `settings.json` and `warnings.log`
+from where earlier versions kept them (`%APPDATA%\MeetingRecorder`, `%LOCALAPPDATA%\MeetingRecorder`); the old files are
+left in place.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -121,31 +124,33 @@ Minimized windows are restored when recording starts.
 
 ## Install, update, uninstall
 
-Deployment follows the [App deployment standard v1.2](https://github.com/dgtvan/local-app-deployment-strategy).
+Deployment follows the [App deployment standard v2.1](https://github.com/dgtvan/local-app-deployment-strategy),
+for one Windows account: run the scripts from the account that uses the app.
 
-| Script | Who runs it | What it does |
-|---|---|---|
-| `publish.cmd` | The developer or agent, after every change | Builds into `D:\Apps\MeetingRecorder\builds\<build id>\`, keeps the newest 3 builds plus any build an account has installed, and reports what each account's app did with it |
-| `install.cmd` | Each Windows account that uses the app, **once**, from that account | Installs the latest published build to `%LOCALAPPDATA%\Programs\MeetingRecorder`, starts it at sign-in (HKCU Run), adds a Start Menu shortcut and a *Settings > Apps* entry, and starts it. Installs missing prerequisites with winget. Re-run it to repair the install. |
-| `uninstall.cmd` | That account | Removes the app and its registration; keeps settings and recordings unless `-RemoveData` / `-RemoveRecordings` |
+| Script | What it does |
+|---|---|
+| `build.cmd` | Builds the working directory into `dist\` (release). Installs nothing. |
+| `install.cmd` | Copies `dist\` to `%LOCALAPPDATA%\MeetingRecorder\app`, starts it at sign-in (HKCU Run) and from a Start Menu shortcut, and starts it. Installs missing prerequisites with winget, and removes entries left by earlier install methods (`%LOCALAPPDATA%\Programs\MeetingRecorder`, the *Settings > Apps* entry). Safe to re-run. `-NoStart` skips starting it. |
+| `uninstall.cmd` | Removes the app folder, the Run value and the shortcut. Never deletes `%LOCALAPPDATA%\MeetingRecorder\data` or the recordings; it prints where they are. |
+| `deploy.cmd` | `build`, `uninstall`, `install`: all an update needs. A failed build stops it before anything is removed. |
 
-After the first install, the app updates itself: it watches `D:\Apps\MeetingRecorder\builds\`, and when the
-latest build differs from its own it installs it and restarts, but only when no recording is in progress.
-Unread warnings don't hold an update back (unlike section 7.3 of the standard): they are in the warnings log, and
-belong to the session before the restart. A build that fails to install is not retried; it shows a tray warning instead.
-To withdraw a bad build, delete its folder (or just its `build-id.txt`); apps go back to the previous build.
+All scripts accept `/quiet` as the first argument (no pause). Exit codes: `0` done, `1` error, `3` refused.
 
-The app keeps its update state in `%LOCALAPPDATA%\MeetingRecorder\update-state.txt` and mirrors it to
-`D:\Apps\MeetingRecorder\pickup\<user name>\status.txt`, which is how `publish.cmd` reports per account.
+Install and uninstall don't close the app by force: they ask it to (named event `Local\MeetingRecorder-Exit`).
+When idle it exits. While a recording is starting, running or saving it is **busy**: it refuses
+(`Local\MeetingRecorder-ExitRefused`), keeps recording and shows a notification, and the script stops with exit
+code 3 without changing anything. `-Force` closes it anyway: the recording is saved and ends, then the install goes
+on. An app that doesn't answer within 10 s (e.g. a build from before v2.1) also gets exit code 3 without `-Force`.
 
-All scripts accept `/quiet` as the first argument (no pause). `install.cmd` and `uninstall.cmd` refuse while a
-recording is in progress (exit code 3) unless given `-Force`, which saves and ends the recording.
+The app must be started with `--data-dir "<folder>"` (the Run value and shortcut do this); without it, it shows an
+error and exits. A second launch exits silently.
 
 ## Build
 
 ```powershell
 dotnet build src/MeetingRecorder        # development build in src/MeetingRecorder/bin/
-publish.cmd                             # release build, published for installed apps
+build.cmd                               # release build in dist\
+deploy.cmd                              # release build, installed and started for this account
 ```
 
 ## Libraries
