@@ -9,9 +9,14 @@ namespace MeetingRecorder;
 static class TrayIcons
 {
     private static readonly Color WarningFill = Color.FromArgb(255, 196, 0);
+    private static readonly Color RecordingFill = Color.FromArgb(230, 30, 30);
+    private const int PulseFrames = 12;
 
     public static Icon Idle { get; } = Create(g => DrawDot(g, Color.FromArgb(150, 150, 150), Color.FromArgb(90, 90, 90)));
-    public static Icon Recording { get; } = Create(g => DrawDot(g, Color.FromArgb(230, 30, 30), Color.White));
+
+    /// <summary>Recording: the red dot fading in and out, one icon per animation frame.</summary>
+    public static Icon[] Recording { get; } = Pulse(dot => g => DrawDot(g, dot, Color.White));
+
     public static Icon Starting { get; } = Create(g => DrawDot(g, Color.FromArgb(245, 165, 0), Color.White));
 
     /// <summary>Saving a recording: a blue spinner, one icon per animation frame.</summary>
@@ -22,10 +27,10 @@ static class TrayIcons
     /// <summary>Needs attention while idle: a large warning triangle.</summary>
     public static Icon Warning { get; } = Create(g => DrawTriangle(g, new RectangleF(0, 0, Size, Size)));
 
-    /// <summary>Needs attention while still recording: the red dot with a warning badge.</summary>
-    public static Icon RecordingWarning { get; } = Create(g =>
+    /// <summary>Needs attention while still recording: the pulsing red dot with a steady warning badge.</summary>
+    public static Icon[] RecordingWarning { get; } = Pulse(dot => g =>
     {
-        DrawDot(g, Color.FromArgb(230, 30, 30), Color.White);
+        DrawDot(g, dot, Color.White);
         float badge = Size * 0.62f;
         DrawTriangle(g, new RectangleF(Size - badge, Size - badge, badge, badge));
     });
@@ -43,6 +48,15 @@ static class TrayIcons
         using var brush = new SolidBrush(dot);
         g.FillEllipse(brush, inset, inset, size - inset * 2 - 0.5f, size - inset * 2 - 0.5f);
     }
+
+    /// <summary>One icon per frame of a pulse whose recording dot fades between 30% and 100% opacity.</summary>
+    private static Icon[] Pulse(Func<Color, Action<Graphics>> draw) => Enumerable.Range(0, PulseFrames)
+        .Select(frame =>
+        {
+            double alpha = 0.3 + 0.7 * (0.5 + 0.5 * Math.Cos(2 * Math.PI * frame / PulseFrames));
+            return Create(draw(Color.FromArgb((int)(255 * alpha), RecordingFill)));
+        })
+        .ToArray();
 
     private static void DrawSpinner(Graphics g, float startAngle)
     {

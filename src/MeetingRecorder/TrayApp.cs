@@ -40,7 +40,7 @@ sealed class TrayApp : ApplicationContext
     private readonly ToolStripMenuItem _problemItem;
     private readonly ToolStripSeparator _problemSeparator = new() { Visible = false };
     private readonly System.Windows.Forms.Timer _watchdog = new() { Interval = 5000 };
-    private readonly System.Windows.Forms.Timer _spinner = new() { Interval = 125 };
+    private readonly System.Windows.Forms.Timer _animation = new() { Interval = 125 };
     private readonly System.Windows.Forms.Timer _teamsTimer = new() { Interval = TeamsCheckMilliseconds };
     private int _callChecks;
     private int _noCallChecks;
@@ -48,7 +48,7 @@ sealed class TrayApp : ApplicationContext
     private bool _autoTriedThisCall;
     private bool _recordingIsAuto;
     private IntPtr _autoWindow;
-    private int _spinnerFrame;
+    private int _animationFrame;
     private readonly List<string> _problems = [];
     private readonly EventWaitHandle _exitRequest = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-Exit");
     private readonly EventWaitHandle _exitRefused = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-ExitRefused");
@@ -143,9 +143,10 @@ sealed class TrayApp : ApplicationContext
         _watchdog.Tick += (_, _) => CheckHealth();
         _teamsTimer.Tick += (_, _) => CheckTeams();
         _teamsTimer.Enabled = _settings.AutoRecordTeams;
-        _spinner.Tick += (_, _) =>
+        _animation.Tick += (_, _) =>
         {
-            _spinnerFrame = (_spinnerFrame + 1) % TrayIcons.Processing.Length;
+            // A common multiple of every animation's frame count, so each one loops cleanly.
+            _animationFrame = (_animationFrame + 1) % (TrayIcons.Processing.Length * TrayIcons.Recording.Length);
             RefreshIcon();
         };
         Application.ThreadException += (_, e) => AddProblem($"Unexpected error: {e.Exception.Message}");
@@ -169,8 +170,8 @@ sealed class TrayApp : ApplicationContext
         _stopItem.Enabled = state is State.Recording or State.Starting;
         _systemAudioItem.Enabled = _microphoneItem.Enabled = _changeRootItem.Enabled = state == State.Idle;
         _watchdog.Enabled = state != State.Idle;
-        _spinnerFrame = 0;
-        _spinner.Enabled = state == State.Processing;
+        _animationFrame = 0;
+        _animation.Enabled = state is State.Recording or State.Processing;
         RefreshIcon();
     }
 
@@ -179,10 +180,10 @@ sealed class TrayApp : ApplicationContext
         bool hasProblem = _problems.Count > 0;
         (Icon icon, string text) = _state switch
         {
-            State.Recording => (hasProblem ? TrayIcons.RecordingWarning : TrayIcons.Recording,
+            State.Recording => (Frame(hasProblem ? TrayIcons.RecordingWarning : TrayIcons.Recording),
                 $"Recording since {_session!.StartedAt:HH:mm}: {_session.TargetName}"),
             State.Starting => (TrayIcons.Starting, "Starting recording..."),
-            State.Processing => (TrayIcons.Processing[_spinnerFrame], "Saving recording... (not finished yet)"),
+            State.Processing => (Frame(TrayIcons.Processing), "Saving recording... (not finished yet)"),
             _ => (hasProblem ? TrayIcons.Warning : TrayIcons.Idle, "Idle"),
         };
         if (hasProblem)
@@ -199,6 +200,8 @@ sealed class TrayApp : ApplicationContext
             _ => $"Needs attention: {_problems.Count} problems",
         };
     }
+
+    private Icon Frame(Icon[] frames) => frames[_animationFrame % frames.Length];
 
     /// <summary>
     /// Records something the user must act on: logged, and the tray icon shows a warning until they look at it.
@@ -556,7 +559,7 @@ sealed class TrayApp : ApplicationContext
     private void ExitNow()
     {
         _watchdog.Dispose();
-        _spinner.Dispose();
+        _animation.Dispose();
         _teamsTimer.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
