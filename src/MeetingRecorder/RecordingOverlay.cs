@@ -6,7 +6,7 @@ namespace MeetingRecorder;
 
 /// <summary>
 /// Shows that a window is being recorded: a red border just outside the window and a "Recording" label with a
-/// pulsing dot above its top-left corner. Replaces the Windows Graphics Capture border, which Windows hides and
+/// pulsing dot in the border's top-left corner, inside it. Replaces the Windows Graphics Capture border, which Windows hides and
 /// redraws on its own and so flashes.
 /// </summary>
 /// <remarks>
@@ -39,7 +39,7 @@ sealed class RecordingOverlay : IDisposable
     private const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
 
     private static readonly Color BorderColor = Color.FromArgb(232, 17, 35);
-    private static readonly Color LabelBackColor = Color.FromArgb(32, 32, 32);
+    private static readonly Color LabelTextColor = Color.White;
     private const string LabelText = "Recording";
     private const int BorderThickness = 3;
     private const int PulseFrames = 16;
@@ -149,11 +149,8 @@ sealed class RecordingOverlay : IDisposable
             RenderLabelFrames(dpi);
 
         _border.SetBounds(outer, thickness);
-        int x = Math.Max(monitor.Left, Math.Min(outer.Left, monitor.Right - _labelSize.Width));
-        int y = outer.Top - _labelSize.Height;
-        if (y < monitor.Top)
-            y = outer.Top + thickness;
-        _labelPosition = new Point(x, y);
+        // A tab hanging from the border into the window, like a title; it covers the window's own corner.
+        _labelPosition = new Point(outer.Left, outer.Top);
         ShowLabelFrame();
 
         if (!_visible)
@@ -236,16 +233,16 @@ sealed class RecordingOverlay : IDisposable
         _labelSize = new Size(padding + dot + gap + text.Width + padding, height);
 
         _frames = new IntPtr[PulseFrames];
-        using var textBrush = new SolidBrush(Color.White);
+        using var textBrush = new SolidBrush(LabelTextColor);
         for (int i = 0; i < PulseFrames; i++)
         {
             double alpha = 0.25 + 0.75 * (0.5 + 0.5 * Math.Cos(2 * Math.PI * i / PulseFrames));
             using var bitmap = new Bitmap(_labelSize.Width, _labelSize.Height);
             using (var g = Graphics.FromImage(bitmap))
             {
-                g.Clear(LabelBackColor);
+                g.Clear(BorderColor);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using var dotBrush = new SolidBrush(Color.FromArgb((int)(255 * alpha), BorderColor));
+                using var dotBrush = new SolidBrush(Color.FromArgb((int)(255 * alpha), LabelTextColor));
                 g.FillEllipse(dotBrush, padding, (height - dot) / 2f, dot, dot);
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                 g.DrawString(LabelText, font, textBrush, new RectangleF(padding + dot + gap, 0, text.Width + padding, height),
