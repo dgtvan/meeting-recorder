@@ -24,6 +24,7 @@ sealed class TrayApp : ApplicationContext
     private const int TeamsCheckMilliseconds = 3000;
     private const int CallStartedChecks = 2;
     private const int CallEndedChecks = 4;
+    private static readonly TimeSpan MinAutoRecording = TimeSpan.FromSeconds(30);
 
     private enum State { Idle, Starting, Recording, Processing }
 
@@ -266,9 +267,12 @@ sealed class TrayApp : ApplicationContext
     /// </summary>
     private void CheckTeams()
     {
-        // Teams closes the meeting window the moment the call ends, so this is the quickest end signal.
+        // Teams closes the meeting window the moment the call ends, so this is the quickest end signal. It also
+        // replaces the window mid-call (the pre-join screen, which already holds the microphone, becomes the meeting
+        // window on Join), so once this recording is saved, a call that is still active is recorded again.
         if (_recordingIsAuto && _state is (State.Recording or State.Starting) && !WindowList.IsAlive(_autoWindow))
         {
+            _autoTriedThisCall = false;
             StopRecording();
             return;
         }
@@ -506,10 +510,18 @@ sealed class TrayApp : ApplicationContext
 
     private void OnSessionFinished(RecordingProcess session, string? error)
     {
+        bool wasAuto = _recordingIsAuto;
         _session = null;
         _recordingIsAuto = false;
-        _lastFolder = session.FolderPath ?? _lastFolder;
         SetState(State.Idle);
+        if (wasAuto && error == null && DropShortCall(session))
+        {
+            if (_exitAfterStop)
+                ExitNow();
+            return;
+        }
+
+        _lastFolder = session.FolderPath ?? _lastFolder;
         // The worker renames its files itself; this covers a worker that was killed or crashed first.
         if (session.FolderPath != null && Directory.Exists(session.FolderPath)
             && RecordingSession.FinalizeFiles(session.FolderPath) is { } renameError)
@@ -526,6 +538,29 @@ sealed class TrayApp : ApplicationContext
         else if (_problems.Count == 0)
             ShowBalloon("Recording saved",
                 Join(session.EndNote ?? "", "Click to open " + Path.GetFileName(session.FolderPath ?? "")), ToolTipIcon.Info);
+    }
+
+    /// <summary>
+    /// Deletes an auto-recorded Teams call shorter than <see cref="MinAutoRecording"/>, such as a pre-join screen or a
+    /// call that was left at once, and logs it. Returns false when the recording is kept.
+    /// </summary>
+    private bool DropShortCall(RecordingProcess session)
+    {
+        if (session.FolderPath is not { } folder || session.CapturedFor is not { } length || length >= MinAutoRecording)
+            return false;
+        string name = Path.GetFileName(folder);
+        try
+        {
+            if (Directory.Exists(folder))
+                Directory.Delete(folder, recursive: true);
+            WarningLog.Append($"Dropped Teams recording {name}: {length.TotalSeconds:0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.");
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AddProblem($"Could not delete the short Teams recording {name}: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>

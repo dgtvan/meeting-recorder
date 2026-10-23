@@ -15,10 +15,15 @@ sealed class RecordingProcess
     private readonly Process _process;
     private string? _error;
     private bool _finishedReported;
+    private DateTime? _capturingSince;
+    private DateTime? _savingSince;
 
     public string TargetName { get; }
     public DateTime StartedAt { get; } = DateTime.Now;
     public string? FolderPath { get; private set; }
+
+    /// <summary>How long video and audio were captured so far; null if capturing never began.</summary>
+    public TimeSpan? CapturedFor => _capturingSince is { } since ? (_savingSince ?? DateTime.Now) - since : null;
 
     /// <summary>Why the recording ended on its own when nothing went wrong, e.g. the window was closed.</summary>
     public string? EndNote { get; private set; }
@@ -101,9 +106,11 @@ sealed class RecordingProcess
                 FolderPath = text;
                 break;
             case "started":
+                _capturingSince = DateTime.Now;
                 Started?.Invoke(this);
                 break;
             case "stopping":
+                _savingSince ??= DateTime.Now;
                 Stopping?.Invoke(this);
                 break;
             case "fallback":
