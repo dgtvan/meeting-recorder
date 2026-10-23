@@ -4,7 +4,8 @@ Records a video file through MeetingRecorder's encoder settings and reports CPU,
 
 .DESCRIPTION
 Uses the worker's --file source, so nothing is captured from the screen. Writes a temporary settings.json for the
-run and restores the previous one afterwards. The recording folder is left in place; delete it when done.
+run and restores the previous one afterwards. Audio sources are off unless given: pass the id of an output
+device nothing plays to as -SystemAudio to measure audio without recording anyone ("" = Windows default). The recording folder is left in place; delete it when done.
 CPU and GPU include decoding the source file, so compare them between runs rather than reading them as absolute.
 
 .EXAMPLE
@@ -17,13 +18,19 @@ param(
     [int]$Seconds = 60,
     [int]$MaxHeight = 1080,
     [string]$Compress = 'true',
-    [int]$Quality = 60
+    [int]$Quality = 60,
+    [string]$SystemAudio = 'off',
+    [string]$Microphone = 'off'
 )
 
 $settingsPath = Join-Path $env:APPDATA 'MeetingRecorder\settings.json'
 $backup = if (Test-Path $settingsPath) { Get-Content -Raw $settingsPath } else { $null }
 New-Item -ItemType Directory -Force (Split-Path $settingsPath) | Out-Null
-Set-Content -Path $settingsPath -Value ('{{"SchemaVersion":1,"MaxVideoHeight":{0},"CompressAudio":{1},"VideoQuality":{2}}}' -f $MaxHeight, $Compress, $Quality)
+$settings = [ordered]@{
+    SchemaVersion = 1; MaxVideoHeight = $MaxHeight; CompressAudio = [bool]::Parse($Compress); VideoQuality = $Quality
+    SystemAudioDeviceId = $SystemAudio; MicrophoneDeviceId = $Microphone; AutoRecordTeams = $false
+}
+Set-Content -Path $settingsPath -Value ($settings | ConvertTo-Json)
 
 try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo (Resolve-Path $Exe)

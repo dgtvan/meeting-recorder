@@ -17,11 +17,13 @@ and microphone saved to **separate** audio files.
 
   | File | Content |
   |---|---|
-  | `video.mp4` | H.264 video, no audio; scaled down to 1080 lines when the source is taller |
+  | `video.mp4` | H.264 video, scaled down to 1080 lines when the source is taller, with system audio and microphone mixed into one AAC track for easy review |
   | `audio-system.m4a` | What the PC plays (loopback), AAC 48 kHz stereo 128 kbps |
   | `audio-mic.m4a` | Microphone, AAC 48 kHz mono 96 kbps |
 
-  All three start at the first video frame, so they line up when played or edited together.
+  The separate audio files are for analysis (each source on its own); all three start at the first video frame, so
+  they line up with the video. If the recorder can't open the audio devices for the video, the video is recorded
+  without sound and a warning says so; the separate files are still recorded.
   Audio is recorded as WAV (no encoding work while recording, and safe if the PC crashes) and converted to AAC
   when the recording stops. With `CompressAudio` off, or if a conversion fails, the WAV is kept instead
   (`audio-system.wav`, 16-bit stereo; `audio-mic.wav`, 16-bit mono).
@@ -60,7 +62,7 @@ Measurements and the reasoning behind the defaults: [docs/performance.md](docs/p
 - Each recording runs in a short-lived child process (`MeetingRecorder.exe --record ...`). The native
   capture stack holds ~250 MB that it never gives back, so isolating it means memory returns to the system
   as soon as a recording ends. It also stops cleanly if the tray process dies.
-- Files are about 0.5–3 MB per minute of video (depends on screen activity), 0.9 MB/min system audio,
+- Files are about 0.5–3 MB per minute of video (depends on screen activity) plus 0.9 MB/min for its sound track, 0.9 MB/min system audio,
   0.7 MB/min microphone (WAV: 11 and 5.5 MB/min).
 - `video.mp4` is a fragmented MP4, so it stays playable even if the PC crashes mid-recording.
 

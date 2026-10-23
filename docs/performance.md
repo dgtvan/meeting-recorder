@@ -12,6 +12,13 @@ cd bench
 `bench.ps1` replays the test video through the recorder (`--record --file`), so nothing is captured from the
 screen. Its CPU and GPU figures include decoding the source video, so only compare them between runs.
 
+## 2026-10-23: sound track in video.mp4
+
+The video now carries system audio and microphone mixed into one AAC track (128 kbps stereo, encoded live by the
+recorder), while the separate WAV/AAC files are still written. A 20 s run (1080p, system audio from an output device
+nothing plays to, microphone off): video.mp4 3.25 MB/min (about 2.6 video + 0.9 sound), CPU 4.4%, save 0.9 s, the same
+as without the track within run-to-run noise.
+
 ## 2026-10-23: downscale to 1080p, AAC audio
 
 **Machine:** 16 logical cores, Intel Arc 140T integrated GPU (hardware H.264), 2560x1440 display.

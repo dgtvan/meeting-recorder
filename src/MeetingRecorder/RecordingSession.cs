@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using ScreenRecorderLib;
@@ -16,8 +17,9 @@ sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayD
 }
 
 /// <summary>
-/// One recording: a new folder holding video.mp4 plus a separate audio file per source, recorded as WAV and
-/// converted to AAC (.m4a) after the recording stops unless <see cref="AppSettings.CompressAudio"/> is off.
+/// One recording: a new folder holding video.mp4 (with system audio and microphone mixed in, for easy review) plus a
+/// separate audio file per source, recorded as WAV and converted to AAC (.m4a) after the recording stops unless
+/// <see cref="AppSettings.CompressAudio"/> is off.
 /// </summary>
 /// <remarks>All events are raised on the UI thread.</remarks>
 sealed class RecordingSession
@@ -41,6 +43,8 @@ sealed class RecordingSession
     private WindowTracker? _tracker;
     private Task? _audioStopped;
     private bool _videoStarted;
+    // Cleared when the recorder can't start with audio, so a broken audio device never costs the video.
+    private bool _videoAudio = true;
     private bool _stopRequested;
     private bool _finished;
 
@@ -149,7 +153,7 @@ sealed class RecordingSession
         {
             SourceOptions = new SourceOptions { RecordingSources = [source] },
             OutputOptions = output,
-            AudioOptions = new AudioOptions { IsAudioEnabled = false },
+            AudioOptions = VideoAudioOptions(),
             VideoEncoderOptions = new VideoEncoderOptions
             {
                 Encoder = new H264VideoEncoder
@@ -183,7 +187,10 @@ sealed class RecordingSession
         bool canFallBack = _target.WindowHandle != IntPtr.Zero && _tracker == null && !_videoStarted && !_stopRequested;
         if (!canFallBack)
         {
-            OnVideoEnded(error);
+            if (_videoAudio && !_videoStarted && !_stopRequested)
+                RetryWithoutVideoAudio(error);
+            else
+                OnVideoEnded(error);
             return;
         }
 
@@ -198,6 +205,66 @@ sealed class RecordingSession
         catch (Exception ex)
         {
             OnVideoEnded($"{error}\nFallback capture also failed: {ex.Message}");
+        }
+    }
+
+    private void RetryWithoutVideoAudio(string error)
+    {
+        _videoAudio = false;
+        _recorder!.Dispose();
+        _recorder = null;
+        _tracker?.Dispose();
+        _tracker = null;
+        Warning?.Invoke($"The video has no sound this time (the separate audio files are still recorded): {error}");
+        try
+        {
+            Start();
+        }
+        catch (Exception ex)
+        {
+            OnVideoEnded($"{error}\nRetry without sound in the video also failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>The same sources as the separate audio files, mixed into one AAC track of the video.</summary>
+    private AudioOptions VideoAudioOptions()
+    {
+        var sources = new List<AudioSourceBase>();
+        if (_videoAudio)
+        {
+            if (VideoAudioDevice(_settings.SystemAudioDeviceId) is { } system)
+                sources.Add(system.Length == 0 ? new LoopbackAudioSource() : new LoopbackAudioSource(system));
+            if (VideoAudioDevice(_settings.MicrophoneDeviceId) is { } mic)
+                sources.Add(mic.Length == 0 ? new CaptureAudioSource() : new CaptureAudioSource(mic));
+        }
+        return new AudioOptions
+        {
+            IsAudioEnabled = sources.Count > 0,
+            AudioSources = sources,
+            Bitrate = AudioBitrate.bitrate_128kbps,
+            Channels = AudioChannels.Stereo,
+        };
+    }
+
+    /// <summary>
+    /// The device id to give the recorder: null when the source is off, "" for the Windows default (also used when
+    /// the chosen device is gone, like the separate audio files do).
+    /// </summary>
+    private static string? VideoAudioDevice(string deviceId)
+    {
+        if (deviceId == AppSettings.DisabledDevice)
+            return null;
+        if (deviceId == AppSettings.DefaultDevice)
+            return "";
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            using var device = enumerator.GetDevice(deviceId);
+            return device.State == DeviceState.Active ? deviceId : "";
+        }
+        catch (COMException)
+        {
+            return "";
         }
     }
 
