@@ -86,6 +86,7 @@ static class RecorderWorker
         }
         catch (Exception ex)
         {
+            session.DeleteFolderIfEmpty();
             Send("failed", ex.Message);
             return 1;
         }

@@ -403,9 +403,22 @@ sealed class RecordingSession
         }
         if (FinalizeFiles(FolderPath) is { } renameError)
             Warning?.Invoke(renameError);
-        if (error != null && !Directory.EnumerateFileSystemEntries(FolderPath).Any())
-            Directory.Delete(FolderPath);
+        if (error != null)
+            DeleteFolderIfEmpty();
         Finished?.Invoke(this, error);
+    }
+
+    /// <summary>Removes the recording folder when a recording failed before writing anything.</summary>
+    public void DeleteFolderIfEmpty()
+    {
+        try
+        {
+            if (!Directory.EnumerateFileSystemEntries(FolderPath).Any())
+                Directory.Delete(FolderPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
     /// <summary>
