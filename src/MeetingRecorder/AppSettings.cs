@@ -50,6 +50,9 @@ sealed class AppSettings
     /// <summary>Use the GPU's H.264 encoder when available; falls back to software encoding otherwise.</summary>
     public bool UseHardwareEncoder { get; set; } = true;
 
+    /// <summary>Start recording the meeting window when a Teams call or meeting starts, and stop when it ends.</summary>
+    public bool AutoRecordTeams { get; set; } = true;
+
     public static AppSettings Load() => Load(out _);
 
     /// <summary>

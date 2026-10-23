@@ -39,7 +39,12 @@ themselves; after that, publishing is all an update needs. Never pass -Force.
 - Window capture (Windows Graphics Capture) isn't available from the agent account, so `--window` falls back to a
   cropped display capture, which records whatever covers the window, including the user's own work. For performance
   tests use `--record --file <video> --name <n>` instead: it replays a video file through the same encoder settings
-  and captures nothing from the screen. Generate a synthetic test video with ffmpeg, and delete test recordings afterwards.
+  and captures nothing from the screen. `bench/make-test-video.ps1` makes the test video and `bench/bench.ps1`
+  measures a run; log results in docs/performance.md. Delete test recordings afterwards.
+- `MeetingRecorder.exe --teams-status` prints whether a Teams call is active and which window auto-record would use.
+  It captures nothing, and works from the agent account because it shares the user's desktop and audio devices.
+- Publishing while the user is in a Teams call makes the updated app start recording that call (it updates whenever
+  it's idle). Check `--teams-status` first and wait for `call none`, unless the user says otherwise.
 - Deployment tests: section 11 of the standard, with a throwaway install under the agent account, removed afterwards
   with `uninstall.cmd /quiet -RemoveData`.
 - Delete files with `~/.claude/.addons/utilities/file-helper/dist/file-helper.exe delete <file>`; `rm` is blocked.

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 
 namespace MeetingRecorder;
@@ -18,6 +19,11 @@ sealed class TrayApp : ApplicationContext
     private const long LowDiskSpaceBytes = 2L << 30;
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan SaveTimeout = TimeSpan.FromMinutes(2);
+    // Teams is checked every 3 s: a call must be seen twice to start (skips a quick device test) and be gone
+    // four times in a row to stop (rides out a device switch mid-call).
+    private const int TeamsCheckMilliseconds = 3000;
+    private const int CallStartedChecks = 2;
+    private const int CallEndedChecks = 4;
 
     private enum State { Idle, Starting, Recording, Processing }
 
@@ -30,10 +36,17 @@ sealed class TrayApp : ApplicationContext
     private readonly ToolStripMenuItem _changeRootItem;
     private readonly ToolStripMenuItem _systemAudioItem;
     private readonly ToolStripMenuItem _microphoneItem;
+    private readonly ToolStripMenuItem _autoTeamsItem;
     private readonly ToolStripMenuItem _problemItem;
     private readonly ToolStripSeparator _problemSeparator = new() { Visible = false };
     private readonly System.Windows.Forms.Timer _watchdog = new() { Interval = 5000 };
     private readonly System.Windows.Forms.Timer _spinner = new() { Interval = 125 };
+    private readonly System.Windows.Forms.Timer _teamsTimer = new() { Interval = TeamsCheckMilliseconds };
+    private int _callChecks;
+    private int _noCallChecks;
+    // One automatic recording per call: after it is stopped by hand or fails, wait for the next call.
+    private bool _autoTriedThisCall;
+    private bool _recordingIsAuto;
     private int _spinnerFrame;
     private readonly List<string> _problems = [];
     private readonly SelfUpdater _updater = new();
@@ -80,6 +93,12 @@ sealed class TrayApp : ApplicationContext
         _microphoneItem.DropDownOpening += (_, _) => BuildDeviceMenu(_microphoneItem, DataFlow.Capture,
             () => _settings.MicrophoneDeviceId, id => _settings.MicrophoneDeviceId = id);
 
+        _autoTeamsItem = new ToolStripMenuItem("Auto-record Teams meetings", null, (_, _) => ToggleAutoTeams())
+        {
+            Checked = _settings.AutoRecordTeams,
+            ToolTipText = "Records the meeting window when a Teams call or meeting starts and stops when it ends.",
+        };
+
         _menu.Items.AddRange(
         [
             _problemItem,
@@ -91,6 +110,7 @@ sealed class TrayApp : ApplicationContext
             new ToolStripMenuItem("Open recordings folder", null, (_, _) => OpenFolder(EnsureRoot())),
             _changeRootItem,
             new ToolStripSeparator(),
+            _autoTeamsItem,
             _systemAudioItem,
             _microphoneItem,
             new ToolStripSeparator(),
@@ -118,6 +138,8 @@ sealed class TrayApp : ApplicationContext
         };
 
         _watchdog.Tick += (_, _) => CheckHealth();
+        _teamsTimer.Tick += (_, _) => CheckTeams();
+        _teamsTimer.Enabled = _settings.AutoRecordTeams;
         _spinner.Tick += (_, _) =>
         {
             _spinnerFrame = (_spinnerFrame + 1) % TrayIcons.Processing.Length;
@@ -223,6 +245,61 @@ sealed class TrayApp : ApplicationContext
         }
         catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
         {
+        }
+    }
+
+    /// <summary>
+    /// Starts recording the meeting window once a Teams call has been seen for a few seconds, and stops a recording
+    /// it started once the call has been gone for a few seconds.
+    /// </summary>
+    private void CheckTeams()
+    {
+        bool inCall;
+        try
+        {
+            inCall = TeamsMeeting.IsCallActive();
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        {
+            // Audio devices can be mid-change; the next check decides.
+            return;
+        }
+
+        if (!inCall)
+        {
+            _callChecks = 0;
+            if (++_noCallChecks < CallEndedChecks)
+                return;
+            _autoTriedThisCall = false;
+            if (_recordingIsAuto && _state is State.Recording or State.Starting)
+                StopRecording();
+            return;
+        }
+
+        _noCallChecks = 0;
+        if (++_callChecks < CallStartedChecks || _autoTriedThisCall || _state != State.Idle || _exitAfterStop)
+            return;
+        if (TeamsMeeting.FindMeetingWindow() is not { } window)
+            return;
+
+        _autoTriedThisCall = true;
+        StartRecording(new RecordingTarget(window.Title, window.Handle, null), automatic: true);
+        if (_session != null)
+            ShowBalloon("Recording Teams meeting", $"{window.Title}\nStops by itself when the meeting ends.", ToolTipIcon.Info);
+    }
+
+    private void ToggleAutoTeams()
+    {
+        _settings.AutoRecordTeams = !_settings.AutoRecordTeams;
+        _autoTeamsItem.Checked = _teamsTimer.Enabled = _settings.AutoRecordTeams;
+        _callChecks = _noCallChecks = 0;
+        try
+        {
+            _settings.Save();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AddProblem($"Could not save the auto-record setting: {ex.Message}");
         }
     }
 
@@ -368,10 +445,11 @@ sealed class TrayApp : ApplicationContext
         ShowBalloon("Recordings folder changed", $"New recordings go to {_settings.RecordingsRoot}. Existing ones stay where they are.", ToolTipIcon.Info);
     }
 
-    private void StartRecording(RecordingTarget target)
+    private void StartRecording(RecordingTarget target, bool automatic = false)
     {
         if (_state != State.Idle)
             return;
+        _recordingIsAuto = automatic;
         if (target.WindowHandle != IntPtr.Zero && !WindowList.IsAlive(target.WindowHandle))
         {
             ShowBalloon("Window is gone", "That window was closed. Pick another one.", ToolTipIcon.Info);
@@ -409,6 +487,7 @@ sealed class TrayApp : ApplicationContext
     private void OnSessionFinished(RecordingProcess session, string? error)
     {
         _session = null;
+        _recordingIsAuto = false;
         _lastFolder = session.FolderPath ?? _lastFolder;
         SetState(State.Idle);
         // The worker renames its files itself; this covers a worker that was killed or crashed first.
@@ -492,6 +571,7 @@ sealed class TrayApp : ApplicationContext
     {
         _watchdog.Dispose();
         _spinner.Dispose();
+        _teamsTimer.Dispose();
         _updater.Dispose();
         _tray.Visible = false;
         _tray.Dispose();

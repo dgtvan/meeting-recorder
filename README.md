@@ -9,6 +9,7 @@ and microphone saved to **separate** audio files.
   recording has stopped but its files aren't finished yet).
 - **Start recording**: pick *Full screen* (one entry per display) or any open window.
 - **Stop recording**: from the menu, or double-click the tray icon.
+- **Auto-record Teams meetings** (on by default): see [below](#teams-meetings).
 - **Recordings**: the 10 most recent recordings, each with *Open folder* and its files (the one being recorded
   is listed but can't be opened until it is saved); plus *Open recordings folder*.
 - **System audio** / **Microphone**: choose the device, follow the Windows default, or turn the source off.
@@ -63,6 +64,22 @@ Measurements and the reasoning behind the defaults: [docs/performance.md](docs/p
   0.7 MB/min microphone (WAV: 11 and 5.5 MB/min).
 - `video.mp4` is a fragmented MP4, so it stays playable even if the PC crashes mid-recording.
 
+## Teams meetings
+
+With *Auto-record Teams meetings* ticked, the app records the meeting window by itself when a Microsoft Teams
+(new Teams) call or meeting starts, and stops when it ends. A notification says when it starts.
+
+- **Start:** Teams has been using a microphone for about 5 s (it does so only during a call, even while muted) and
+  its meeting window is open (the separate window titled "*meeting name* | Microsoft Teams"). The recording is
+  named after the meeting.
+- **Stop:** about 12 s after Teams stops using the microphone, or as soon as the meeting window closes.
+- Stopping an automatic recording by hand keeps it stopped for the rest of that call. A recording you started
+  yourself is never stopped automatically, and nothing starts while another recording is running.
+- While you share your screen, Teams minimizes the meeting window, so the video shows the last frame
+  until it's restored. The audio is recorded throughout.
+- Make sure everyone in the meeting knows it's being recorded: unlike Teams' own recording, this app doesn't tell
+  the other participants.
+
 ## Window recording
 
 Windows are captured with Windows Graphics Capture, which records the window even when it is covered.
@@ -87,6 +104,7 @@ Minimized windows are restored when recording starts.
 | `CompressAudio` | `true` | Convert the audio to AAC (.m4a) after stopping; `false` keeps WAV |
 | `CaptureMouseCursor` | `true` | |
 | `UseHardwareEncoder` | `true` | GPU encoding; uses far less CPU and memory than software |
+| `AutoRecordTeams` | `true` | Record Teams calls and meetings automatically (also in the tray menu) |
 
 ## Requirements
 

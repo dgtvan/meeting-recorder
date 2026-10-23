@@ -13,6 +13,13 @@ static class Program
             ApplicationConfiguration.Initialize();
             return RecorderWorker.Run(args);
         }
+        if (args.Length > 0 && args[0] == "--teams-status")
+        {
+            // Diagnostic: what Teams auto-record would see right now. Captures nothing.
+            Console.Out.WriteLine(TeamsMeeting.IsCallActive() ? "call active" : "call none");
+            Console.Out.WriteLine(TeamsMeeting.FindMeetingWindow() is { } window ? $"window {window.Handle} {window.Title}" : "window none");
+            return 0;
+        }
 
         using var mutex = new Mutex(true, @"Local\MeetingRecorder-SingleInstance", out bool isFirstInstance);
         if (!isFirstInstance)
