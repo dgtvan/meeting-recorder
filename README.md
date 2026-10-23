@@ -5,7 +5,7 @@ and microphone saved to **separate** audio files.
 
 ## Features
 
-- Tray icon shows the state: grey = idle, amber = starting, red = recording, spinning blue = saving (the
+- Tray icon shows the state: grey = idle, amber = starting, pulsing red = recording, spinning blue = saving (the
   recording has stopped but its files aren't finished yet).
 - **Start recording**: pick *Full screen* (one entry per display) or any open window.
 - **Stop recording**: from the menu, or double-click the tray icon.
@@ -96,9 +96,10 @@ anything on top of the window is recorded too, and the crop stays on the display
 
 Minimized windows are restored when recording starts.
 
-While a window is recorded, a red border surrounds it, with a red **● Recording** tab (the dot pulses) in its
-top-left corner, over the window's own corner; on a maximized window the border is drawn just inside its edges. They follow the window, hide while
-it's minimized, and stay behind windows that cover it. They are left out of every screen capture, so they don't
+While a window is recorded, a red border surrounds it; on a maximized window it is drawn just inside its edges.
+The border follows the window, hides while it's minimized, and stays behind windows that cover it. A red
+**● Recording** tab in its top-left corner can be turned on with `RecordingOverlay.ShowLabel` (off for now). Both
+are left out of every screen capture, so they don't
 appear in the recording, in screenshots or in a screen share. On Windows 11 this replaces Windows' own yellow
 capture border, which flashes.
 

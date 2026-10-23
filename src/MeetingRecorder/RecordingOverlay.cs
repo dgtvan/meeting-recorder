@@ -5,8 +5,8 @@ using System.Runtime.InteropServices;
 namespace MeetingRecorder;
 
 /// <summary>
-/// Shows that a window is being recorded: a red border just outside the window and a "Recording" label with a
-/// pulsing dot in the border's top-left corner, inside it. Replaces the Windows Graphics Capture border, which Windows hides and
+/// Shows that a window is being recorded: a red border just outside the window and, when <see cref="ShowLabel"/> is
+/// set, a "Recording" label with a pulsing dot in the border's top-left corner, inside it. Replaces the Windows Graphics Capture border, which Windows hides and
 /// redraws on its own and so flashes.
 /// </summary>
 /// <remarks>
@@ -45,10 +45,12 @@ sealed class RecordingOverlay : IDisposable
     private const int BorderThickness = 3;
     private const int PulseFrames = 16;
     private const int PulseFrameMs = 90;
+    // static readonly rather than const so the disabled branches don't raise unreachable-code warnings.
+    private static readonly bool ShowLabel = false;
 
     private readonly IntPtr _target;
     private readonly BorderWindow _border = new(BorderColor);
-    private readonly LayeredWindow _label = new();
+    private readonly LayeredWindow? _label = ShowLabel ? new() : null;
     private readonly WinEventProc _callback;
     private readonly List<IntPtr> _hooks = [];
     private readonly System.Windows.Forms.Timer _rescan = new() { Interval = 1000 };
@@ -94,7 +96,7 @@ sealed class RecordingOverlay : IDisposable
         _rescan.Dispose();
         _pulse.Dispose();
         _border.DestroyHandle();
-        _label.Dispose();
+        _label?.Dispose();
         DeleteFrames();
     }
 
@@ -150,7 +152,7 @@ sealed class RecordingOverlay : IDisposable
             return;
         }
 
-        if (dpi != _framesDpi)
+        if (_label != null && dpi != _framesDpi)
             RenderLabelFrames(dpi);
 
         _border.SetBounds(outer, thickness);
@@ -161,9 +163,12 @@ sealed class RecordingOverlay : IDisposable
         if (!_visible)
         {
             SetWindowPos(_border.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            SetWindowPos(_label.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             _visible = true;
-            _pulse.Start();
+            if (_label != null)
+            {
+                SetWindowPos(_label.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                _pulse.Start();
+            }
         }
         Restack();
     }
@@ -183,19 +188,20 @@ sealed class RecordingOverlay : IDisposable
         _visible = false;
         _pulse.Stop();
         ShowWindow(_border.Handle, 0);
-        ShowWindow(_label.Handle, 0);
+        if (_label != null)
+            ShowWindow(_label.Handle, 0);
     }
 
     /// <summary>
-    /// Puts the label, then the border, directly in front of the target. Skipped when already there, since every
+    /// Puts the label (if shown), then the border, directly in front of the target. Skipped when already there, since every
     /// move would otherwise reorder windows.
     /// </summary>
     private void Restack()
     {
         IntPtr above = GetWindow(_target, GW_HWNDPREV);
-        if (above == _border.Handle && GetWindow(_border.Handle, GW_HWNDPREV) == _label.Handle)
+        if (above == _border.Handle && (_label == null || GetWindow(_border.Handle, GW_HWNDPREV) == _label.Handle))
             return;
-        while (above == _border.Handle || above == _label.Handle)
+        while (above == _border.Handle || (_label != null && above == _label.Handle))
             above = GetWindow(above, GW_HWNDPREV);
 
         // SetWindowPos inserts *behind* insertAfter. HWND_TOP is the top of the target's own band (topmost or not),
@@ -206,7 +212,8 @@ sealed class RecordingOverlay : IDisposable
             : above;
         const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         SetWindowPos(_border.Handle, insertAfter, 0, 0, 0, 0, flags);
-        SetWindowPos(_label.Handle, insertAfter, 0, 0, 0, 0, flags);
+        if (_label != null)
+            SetWindowPos(_label.Handle, insertAfter, 0, 0, 0, 0, flags);
     }
 
     private static bool IsTopmost(IntPtr hwnd) => (GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64() & WS_EX_TOPMOST) != 0;
@@ -220,7 +227,7 @@ sealed class RecordingOverlay : IDisposable
 
     private void ShowLabelFrame()
     {
-        if (_frames.Length > 0)
+        if (_label != null && _frames.Length > 0)
             _label.Show(_frames[_frame], _labelPosition, _labelSize);
     }
 
