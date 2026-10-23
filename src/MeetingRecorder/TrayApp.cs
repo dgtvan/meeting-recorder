@@ -115,6 +115,7 @@ sealed class TrayApp : ApplicationContext
             _systemAudioItem,
             _microphoneItem,
             new ToolStripSeparator(),
+            new ToolStripMenuItem("Open warnings log", null, (_, _) => OpenWarningLog()),
             new ToolStripMenuItem("Exit", null, (_, _) => Exit()),
         ]);
 
@@ -195,9 +196,13 @@ sealed class TrayApp : ApplicationContext
         };
     }
 
-    /// <summary>Records something the user must act on and switches the tray icon to a warning until they look at it.</summary>
+    /// <summary>
+    /// Records something the user must act on: logged, and the tray icon shows a warning until they look at it.
+    /// Warnings are not kept across restarts; the log has them.
+    /// </summary>
     private void AddProblem(string text)
     {
+        WarningLog.Append(text);
         _problems.Add($"{DateTime.Now:HH:mm}  {text}");
         RefreshIcon();
         _tray.ShowBalloonTip(10000, "Meeting Recorder needs attention", text, ToolTipIcon.Warning);
@@ -208,7 +213,7 @@ sealed class TrayApp : ApplicationContext
         if (_problems.Count == 0)
             return;
         string details = string.Join("\n\n", _problems);
-        MessageBox.Show(details + "\n\nThe warning icon clears when you close this message.",
+        MessageBox.Show(details + $"\n\nThe warning icon clears when you close this message. All warnings are kept in {WarningLog.LogPath}.",
             "Meeting Recorder: needs attention", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         _problems.Clear();
         RefreshIcon();
@@ -520,8 +525,9 @@ sealed class TrayApp : ApplicationContext
 
     /// <summary>
     /// Installs the latest published build when it differs from this one (newer, or older after a rollback),
-    /// but never during a recording or while a warning is unread (restarting would lose it). A build whose
-    /// install already failed is not retried, so a broken build can't cause a restart loop.
+    /// but never during a recording. Unread warnings don't hold it back: they are logged and belong to the session
+    /// that raised them (often the update is the fix). A build whose install already failed is not retried, so a
+    /// broken build can't cause a restart loop.
     /// </summary>
     private void CheckForUpdate()
     {
@@ -546,11 +552,6 @@ sealed class TrayApp : ApplicationContext
         if (_state != State.Idle)
         {
             _updater.WriteState($"waiting: build {latest} until the recording in progress ends");
-            return;
-        }
-        if (_problems.Count > 0)
-        {
-            _updater.WriteState($"waiting: build {latest} until the tray warning is read");
             return;
         }
         try
@@ -596,6 +597,14 @@ sealed class TrayApp : ApplicationContext
 
     private void ShowBalloon(string title, string text, ToolTipIcon icon) =>
         _tray.ShowBalloonTip(5000, title, string.IsNullOrEmpty(text) ? title : text, icon);
+
+    private void OpenWarningLog()
+    {
+        if (File.Exists(WarningLog.LogPath))
+            OpenFile(WarningLog.LogPath);
+        else
+            ShowBalloon("No warnings logged", "Nothing has needed attention so far.", ToolTipIcon.Info);
+    }
 
     private static void OpenFolder(string path) =>
         Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });

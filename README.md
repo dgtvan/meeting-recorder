@@ -40,6 +40,10 @@ recording) only when you need to do something, and stays that way until you look
 Windows notifications are muted. Open it from the bold *Needs attention* item at the top of the menu,
 by double-clicking the icon, or by clicking the notification. Closing the details clears the warning.
 
+Every warning is also appended to `%LOCALAPPDATA%\MeetingRecorder\warnings.log` (*Open warnings log* in the menu;
+rolled over to `warnings.old.log` at 1 MB). Warnings belong to one run of the app: a restart, including an update,
+starts with none, and the log keeps the earlier ones.
+
 It's raised when:
 - a recording fails to start, stops by itself, or the recorder crashes or hangs (30 s to start; 2 min plus 5 s per
   recorded minute to save);
@@ -126,8 +130,9 @@ Deployment follows the [App deployment standard v1.2](https://github.com/dgtvan/
 | `uninstall.cmd` | That account | Removes the app and its registration; keeps settings and recordings unless `-RemoveData` / `-RemoveRecordings` |
 
 After the first install, the app updates itself: it watches `D:\Apps\MeetingRecorder\builds\`, and when the
-latest build differs from its own it installs it and restarts, but only when no recording is in progress and
-no warning is waiting to be read. A build that fails to install is not retried; it shows a tray warning instead.
+latest build differs from its own it installs it and restarts, but only when no recording is in progress.
+Unread warnings don't hold an update back (unlike section 7.3 of the standard): they are in the warnings log, and
+belong to the session before the restart. A build that fails to install is not retried; it shows a tray warning instead.
 To withdraw a bad build, delete its folder (or just its `build-id.txt`); apps go back to the previous build.
 
 The app keeps its update state in `%LOCALAPPDATA%\MeetingRecorder\update-state.txt` and mirrors it to
