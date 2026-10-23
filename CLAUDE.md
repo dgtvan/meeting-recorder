@@ -38,8 +38,8 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
   measures a run; log results in docs/performance.md. Delete test recordings afterwards.
 - `MeetingRecorder.exe --teams-status` prints whether a Teams call is active and which window auto-record would use.
   It captures nothing, and works from the agent account because it shares the user's desktop and audio devices.
-- Deploying while the user is in a Teams call makes the new app start recording that call. Check `--teams-status`
-  first and wait for `call none`, unless the user says otherwise.
+- Whether a deploy may run depends only on the app's state: if it isn't running, or is running but not recording,
+  deploy. A Teams call doesn't block it (the new app may then start recording that call, which is fine).
 - Deployment tests: section 8 of the standard. From an account other than the user's, don't start the tray: its
   `Local\` mutex and events are shared with the user's session, and auto-record could capture their screen. Use
   `install.cmd /quiet -NoStart` and `uninstall.cmd /quiet`, which only touch the agent account.
