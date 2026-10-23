@@ -36,6 +36,10 @@ themselves; after that, publishing is all an update needs. Never pass -Force.
 - Recording logic can be exercised without the tray: `MeetingRecorder.exe --record --display "\\.\DISPLAY1" --name fullscreen`
   (or `--window <hwnd>`) from `src/MeetingRecorder/bin/`, then write `stop` to stdin. It prints `folder`, `started`,
   `warning`, `finished`/`failed` lines. Recordings go to the agent account's own Videos folder.
+- Window capture (Windows Graphics Capture) isn't available from the agent account, so `--window` falls back to a
+  cropped display capture, which records whatever covers the window, including the user's own work. For performance
+  tests use `--record --file <video> --name <n>` instead: it replays a video file through the same encoder settings
+  and captures nothing from the screen. Generate a synthetic test video with ffmpeg, and delete test recordings afterwards.
 - Deployment tests: section 11 of the standard, with a throwaway install under the agent account, removed afterwards
   with `uninstall.cmd /quiet -RemoveData`.
 - Delete files with `~/.claude/.addons/utilities/file-helper/dist/file-helper.exe delete <file>`; `rm` is blocked.

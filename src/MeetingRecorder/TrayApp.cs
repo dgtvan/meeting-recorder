@@ -197,11 +197,15 @@ sealed class TrayApp : ApplicationContext
         TimeSpan inState = DateTime.UtcNow - _stateSince;
         if (_state == State.Starting && inState > StartTimeout)
             _session?.Kill($"Recording did not start within {StartTimeout.TotalSeconds:0} seconds.");
-        else if (_state == State.Processing && inState > SaveTimeout)
-            _session?.Kill($"Saving did not finish within {SaveTimeout.TotalMinutes:0} minutes; the files may be incomplete.");
+        else if (_state == State.Processing && _session != null && inState > SaveLimit(_session))
+            _session.Kill($"Saving did not finish within {SaveLimit(_session).TotalMinutes:0} minutes; the files may be incomplete.");
         else if (_state == State.Recording)
             CheckDiskSpace();
     }
+
+    /// <summary>Converting the audio after stop takes about a second per minute recorded, so long recordings get longer.</summary>
+    private TimeSpan SaveLimit(RecordingProcess session) =>
+        SaveTimeout + TimeSpan.FromSeconds(Math.Max(0, (_stateSince.ToLocalTime() - session.StartedAt).TotalMinutes) * 5);
 
     private void CheckDiskSpace()
     {

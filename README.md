@@ -16,13 +16,16 @@ and microphone saved to **separate** audio files.
 
   | File | Content |
   |---|---|
-  | `video.mp4` | H.264 video, no audio |
-  | `audio-system.wav` | What the PC plays (loopback), 48 kHz 16-bit stereo |
-  | `audio-mic.wav` | Microphone, 48 kHz 16-bit mono |
+  | `video.mp4` | H.264 video, no audio; scaled down to 1080 lines when the source is taller |
+  | `audio-system.m4a` | What the PC plays (loopback), AAC 48 kHz stereo 128 kbps |
+  | `audio-mic.m4a` | Microphone, AAC 48 kHz mono 96 kbps |
 
   All three start at the first video frame, so they line up when played or edited together.
-  While a recording is running or being saved, the files are named `video.tmp`, `audio-system.tmp` and
-  `audio-mic.tmp`; they get their final names once saving is done.
+  Audio is recorded as WAV (no encoding work while recording, and safe if the PC crashes) and converted to AAC
+  when the recording stops. With `CompressAudio` off, or if a conversion fails, the WAV is kept instead
+  (`audio-system.wav`, 16-bit stereo; `audio-mic.wav`, 16-bit mono).
+  While a recording is running or being saved, the files have `.tmp` appended (`video.mp4.tmp`,
+  `audio-system.wav.tmp`, ...); they get their final names once saving is done.
 
 Recordings go to `%USERPROFILE%\Videos\Meeting Recordings` by default. Change it with *Change recordings folder...* in the
 tray menu (only while idle); new recordings go to the new folder, existing ones stay where they are.
@@ -35,7 +38,8 @@ Windows notifications are muted. Open it from the bold *Needs attention* item at
 by double-clicking the icon, or by clicking the notification. Closing the details clears the warning.
 
 It's raised when:
-- a recording fails to start, stops by itself, or the recorder crashes or hangs (30 s to start, 2 min to save);
+- a recording fails to start, stops by itself, or the recorder crashes or hangs (30 s to start; 2 min plus 5 s per
+  recorded minute to save);
 - system audio or the microphone can't be recorded, stops mid-recording (e.g. headset unplugged), or the
   chosen device is missing and the Windows default is used instead;
 - the recordings drive has less than 2 GB free;
@@ -46,14 +50,17 @@ window was closed.
 
 ## Resource use
 
+Measurements and the reasoning behind the defaults: [docs/performance.md](docs/performance.md).
+
 - Idle in the tray: about 55 MB RAM and no CPU.
 - While recording: about 1% CPU on a 2560x1440 screen, using the GPU's H.264 encoder at a variable
-  frame rate (a static screen costs almost nothing). WAV audio needs no encoding.
+  frame rate (a static screen costs almost nothing). Audio is written as WAV, so it needs no encoding while recording.
+- Saving: converting the audio to AAC takes about 1–1.5 seconds per recorded minute.
 - Each recording runs in a short-lived child process (`MeetingRecorder.exe --record ...`). The native
   capture stack holds ~250 MB that it never gives back, so isolating it means memory returns to the system
   as soon as a recording ends. It also stops cleanly if the tray process dies.
-- Files are about 0.5–3 MB per minute of video (depends on screen activity), 11 MB/min system audio,
-  5.5 MB/min microphone.
+- Files are about 0.5–3 MB per minute of video (depends on screen activity), 0.9 MB/min system audio,
+  0.7 MB/min microphone (WAV: 11 and 5.5 MB/min).
 - `video.mp4` is a fragmented MP4, so it stays playable even if the PC crashes mid-recording.
 
 ## Window recording
@@ -76,6 +83,8 @@ Minimized windows are restored when recording starts.
 | `SystemAudioDeviceId` / `MicrophoneDeviceId` | `""` | `""` = Windows default, `"off"` = don't record, else a device id (set via the menu) |
 | `VideoFramerate` | `15` | Maximum frames per second |
 | `VideoQuality` | `60` | 1–100; lower = smaller files |
+| `MaxVideoHeight` | `1080` | Taller sources (e.g. a 1440p or 4K screen) are scaled down to this height; `0` = never scale |
+| `CompressAudio` | `true` | Convert the audio to AAC (.m4a) after stopping; `false` keeps WAV |
 | `CaptureMouseCursor` | `true` | |
 | `UseHardwareEncoder` | `true` | GPU encoding; uses far less CPU and memory than software |
 

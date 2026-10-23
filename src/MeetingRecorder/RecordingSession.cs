@@ -1,10 +1,14 @@
 using NAudio.CoreAudioApi;
+using NAudio.Wave;
 using ScreenRecorderLib;
 
 namespace MeetingRecorder;
 
-/// <summary>What to record: one window, or one display ("full screen").</summary>
-sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayDeviceName)
+/// <summary>
+/// What to record: one window, or one display ("full screen"). <see cref="SourceFile"/> replays a video file
+/// instead, for repeatable performance tests that don't capture the screen.
+/// </summary>
+sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayDeviceName, string? SourceFile = null)
 {
     public static RecordingTarget ForWindow(WindowInfo window) => new(window.Title, window.Handle, null);
 
@@ -12,7 +16,8 @@ sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayD
 }
 
 /// <summary>
-/// One recording: a new folder holding video.mp4 plus a separate WAV per audio source.
+/// One recording: a new folder holding video.mp4 plus a separate audio file per source, recorded as WAV and
+/// converted to AAC (.m4a) after the recording stops unless <see cref="AppSettings.CompressAudio"/> is off.
 /// </summary>
 /// <remarks>All events are raised on the UI thread.</remarks>
 sealed class RecordingSession
@@ -20,7 +25,12 @@ sealed class RecordingSession
     public const string VideoFileName = "video.mp4";
     public const string SystemAudioFileName = "audio-system.wav";
     public const string MicrophoneFileName = "audio-mic.wav";
+    private const string CompressedAudioExtension = ".m4a";
     private static readonly string[] FileNames = [VideoFileName, SystemAudioFileName, MicrophoneFileName];
+
+    // The lowest bitrates the Windows AAC encoder offers; transparent for meeting audio.
+    private const int StereoAacBitrate = 128_000;
+    private const int MonoAacBitrate = 96_000;
 
     private readonly SynchronizationContext _ui;
     private readonly AppSettings _settings;
@@ -76,6 +86,11 @@ sealed class RecordingSession
 
     public void Start()
     {
+        if (_target.SourceFile != null)
+        {
+            StartVideo(new VideoRecordingSource(_target.SourceFile), null);
+            return;
+        }
         if (_target.WindowHandle == IntPtr.Zero)
         {
             StartVideo(new DisplayRecordingSource(_target.DisplayDeviceName), null);
@@ -120,16 +135,27 @@ sealed class RecordingSession
         else if (source is DisplayRecordingSource display)
             display.IsCursorCaptureEnabled = _settings.CaptureMouseCursor;
 
+        OutputOptions? output = null;
+        if (crop is { } c)
+            output = new OutputOptions { SourceRect = ToScreenRect(c) };
+        if (ScaledFrameSize(crop?.Size ?? SourceSize(source), _settings.MaxVideoHeight) is { } scaled)
+        {
+            output ??= new OutputOptions();
+            output.OutputFrameSize = scaled;
+            output.Stretch = StretchMode.Uniform;
+        }
+
         var options = new RecorderOptions
         {
             SourceOptions = new SourceOptions { RecordingSources = [source] },
-            OutputOptions = crop is { } c ? new OutputOptions { SourceRect = ToScreenRect(c) } : null,
+            OutputOptions = output,
             AudioOptions = new AudioOptions { IsAudioEnabled = false },
             VideoEncoderOptions = new VideoEncoderOptions
             {
                 Encoder = new H264VideoEncoder
                 {
                     BitrateMode = H264BitrateControlMode.Quality,
+                    // High gave no smaller files than Main on a GPU encoder in quality mode; Main plays everywhere.
                     EncoderProfile = H264Profile.Main,
                 },
                 Quality = _settings.VideoQuality,
@@ -176,6 +202,33 @@ sealed class RecordingSession
     }
 
     private static ScreenRect ToScreenRect(Rectangle r) => new(r.X, r.Y, r.Width, r.Height);
+
+    private static Size? SourceSize(RecordingSourceBase source)
+    {
+        try
+        {
+            var size = Recorder.GetOutputDimensionsForRecordingSources([source]).CombinedOutputSize;
+            return new Size((int)size.Width, (int)size.Height);
+        }
+        catch (Exception)
+        {
+            // Unknown size: record unscaled rather than fail.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The frame size to encode when the source is taller than <paramref name="maxHeight"/>: same aspect ratio,
+    /// even dimensions for H.264. Null when no scaling is needed or the source size is unknown.
+    /// </summary>
+    private static ScreenSize? ScaledFrameSize(Size? source, int maxHeight)
+    {
+        if (source is not { } s || maxHeight <= 0 || s.Height <= maxHeight)
+            return null;
+        int height = maxHeight & ~1;
+        int width = (int)Math.Round(s.Width * (double)height / s.Height) & ~1;
+        return new ScreenSize(width, height);
+    }
 
     public void Stop()
     {
@@ -246,6 +299,14 @@ sealed class RecordingSession
         _tracker?.Dispose();
         _recorder?.Dispose();
         _recorder = null;
+        if (_settings.CompressAudio)
+        {
+            // One after the other: converting both at once measured slower.
+            string?[] compressErrors = await Task.Run(() => ((string[])[SystemAudioFileName, MicrophoneFileName])
+                .Select(name => CompressAudio(FolderPath, name)).ToArray());
+            foreach (string? compressError in compressErrors.Where(e => e != null))
+                Warning?.Invoke(compressError!);
+        }
         if (FinalizeFiles(FolderPath) is { } renameError)
             Warning?.Invoke(renameError);
         if (error != null && !Directory.EnumerateFileSystemEntries(FolderPath).Any())
@@ -256,11 +317,47 @@ sealed class RecordingSession
     /// <summary>
     /// The name a file has while it is being written, so it can't be opened by mistake before it is complete.
     /// </summary>
-    public static string TempFileName(string fileName) => Path.ChangeExtension(fileName, ".tmp");
+    public static string TempFileName(string fileName) => fileName + ".tmp";
+
+    private static string CompressedName(string wavName) => Path.ChangeExtension(wavName, CompressedAudioExtension);
+
+    /// <summary>
+    /// Converts one finished WAV in the folder to AAC, then deletes the WAV. A WAV that can't be converted is kept.
+    /// Returns the problem as a warning message, or null.
+    /// </summary>
+    private static string? CompressAudio(string folder, string wavName)
+    {
+        string wav = Path.Combine(folder, TempFileName(wavName));
+        string target = Path.Combine(folder, CompressedName(wavName));
+        string temp = TempFileName(target);
+        if (!File.Exists(wav))
+            return null;
+        try
+        {
+            using (var reader = new WaveFileReader(wav))
+            {
+                if (reader.Length == 0)
+                    return null;
+                // The stream overload writes MP4 regardless of the file name; the path overload goes by the extension.
+                using var output = new FileStream(temp, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
+                MediaFoundationEncoder.EncodeToAac(reader, output,
+                    reader.WaveFormat.Channels == 1 ? MonoAacBitrate : StereoAacBitrate);
+            }
+            File.Move(temp, target);
+            File.Delete(wav);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            TryDelete(temp);
+            return $"{wavName} could not be compressed and was kept as WAV: {ex.Message}";
+        }
+    }
 
     /// <summary>
     /// Gives every file in a recording folder its final name. Safe to call again, e.g. after the worker was killed
-    /// (a fragmented MP4 cut short is still playable). Returns an error message, or null.
+    /// (a fragmented MP4 cut short is still playable; a half-written .m4a is dropped and its WAV kept).
+    /// Returns an error message, or null.
     /// </summary>
     public static string? FinalizeFiles(string folder)
     {
@@ -268,11 +365,17 @@ sealed class RecordingSession
         foreach (string name in FileNames)
         {
             string temp = Path.Combine(folder, TempFileName(name));
+            if (name != VideoFileName)
+                TryDelete(Path.Combine(folder, TempFileName(CompressedName(name))));
             if (!File.Exists(temp))
                 continue;
             try
             {
-                File.Move(temp, Path.Combine(folder, name));
+                // The compressed copy is complete once it has its final name; only deleting the WAV was cut short.
+                if (name != VideoFileName && File.Exists(Path.Combine(folder, CompressedName(name))))
+                    File.Delete(temp);
+                else
+                    File.Move(temp, Path.Combine(folder, name));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -281,6 +384,17 @@ sealed class RecordingSession
         }
         return errors.Count == 0 ? null
             : $"Could not finish saving {Path.GetFileName(folder)} ({string.Join("; ", errors)}). Rename the .tmp files by hand.";
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
     private static string CreateFolder(string root, DateTime startedAt, string targetName)

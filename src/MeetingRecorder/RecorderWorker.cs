@@ -114,11 +114,13 @@ static class RecorderWorker
         }
 
         string name = Value("--name") ?? throw new ArgumentException("--name is required");
+        if (Value("--file") is { } file)
+            return new RecordingTarget(name, IntPtr.Zero, null, Path.GetFullPath(file));
         if (Value("--window") is { } hwnd)
             return new RecordingTarget(name, new IntPtr(long.Parse(hwnd)), null);
         if (Value("--display") is { } display)
             return new RecordingTarget(name, IntPtr.Zero, display);
-        throw new ArgumentException("--window or --display is required");
+        throw new ArgumentException("--window, --display or --file is required");
     }
 
     private static void Send(string kind, string? text = null)

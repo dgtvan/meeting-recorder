@@ -37,6 +37,14 @@ sealed class AppSettings
     /// <summary>H.264 quality from 1 to 100; lower means smaller files.</summary>
     public int VideoQuality { get; set; } = 60;
 
+    /// <summary>
+    /// Video taller than this many pixels is scaled down (keeping its aspect ratio) before encoding; 0 = never.
+    /// </summary>
+    public int MaxVideoHeight { get; set; } = 1080;
+
+    /// <summary>Convert the audio to AAC (.m4a) once a recording stops; false keeps the WAV files.</summary>
+    public bool CompressAudio { get; set; } = true;
+
     public bool CaptureMouseCursor { get; set; } = true;
 
     /// <summary>Use the GPU's H.264 encoder when available; falls back to software encoding otherwise.</summary>
