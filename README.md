@@ -104,7 +104,7 @@ capture border, which flashes.
 
 ## Settings
 
-`%LOCALAPPDATA%\MeetingRecorder\data\settings.json` (the data folder given by `--data-dir`), created with defaults when
+`%LOCALAPPDATA%\VanDang\MeetingRecorder\data\settings.json` (the data folder given by `--data-dir`), created with defaults when
 the app first starts. On the first start with an empty data folder, the app copies `settings.json` and `warnings.log`
 from where earlier versions kept them (`%APPDATA%\MeetingRecorder`, `%LOCALAPPDATA%\MeetingRecorder`); the old files are
 left in place.
@@ -130,14 +130,14 @@ left in place.
 
 ## Install, update, uninstall
 
-Deployment follows the [App deployment standard v2.1](https://github.com/dgtvan/local-app-deployment-strategy),
+Deployment follows the [App deployment standard v2.2](https://github.com/dgtvan/local-app-deployment-strategy),
 for one Windows account: run the scripts from the account that uses the app.
 
 | Script | What it does |
 |---|---|
 | `build.cmd` | Builds the working directory into `dist\` (release). Installs nothing. |
-| `install.cmd` | Copies `dist\` to `%LOCALAPPDATA%\MeetingRecorder\app`, starts it at sign-in (HKCU Run) and from a Start Menu shortcut, and starts it. Installs missing prerequisites with winget, and removes entries left by earlier install methods (`%LOCALAPPDATA%\Programs\MeetingRecorder`, the *Settings > Apps* entry). Safe to re-run. `-NoStart` skips starting it. |
-| `uninstall.cmd` | Removes the app folder, the Run value and the shortcut. Never deletes `%LOCALAPPDATA%\MeetingRecorder\data` or the recordings; it prints where they are. |
+| `install.cmd` | Copies `dist\` to `%LOCALAPPDATA%\VanDang\MeetingRecorder\app`, starts it at sign-in (HKCU Run) and from a Start Menu shortcut, and starts it. Installs missing prerequisites with winget, and removes entries left by earlier install methods (`%LOCALAPPDATA%\Programs\MeetingRecorder`, `%LOCALAPPDATA%\MeetingRecorder\app`, the *Settings > Apps* entry). Safe to re-run. `-NoStart` skips starting it. |
+| `uninstall.cmd` | Removes the app folder, the Run value and the shortcut. Never deletes `%LOCALAPPDATA%\VanDang\MeetingRecorder\data` or the recordings; it prints where they are. |
 | `deploy.cmd` | `build`, `uninstall`, `install`: all an update needs. A failed build stops it before anything is removed. |
 
 All scripts accept `/quiet` as the first argument (no pause). Exit codes: `0` done, `1` error, `3` refused.

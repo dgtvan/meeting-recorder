@@ -526,7 +526,7 @@ sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// Answers a close request from install/uninstall (App deployment standard v2.1, section 4.4): exits when idle;
+    /// Answers a close request from install/uninstall (App deployment standard v2.2, section 4.4): exits when idle;
     /// while a recording is starting, running or saving it refuses and carries on.
     /// </summary>
     private void OnExitRequested()

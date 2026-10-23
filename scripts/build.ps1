@@ -3,7 +3,7 @@
     Builds Meeting Recorder into dist\ (release configuration).
 
 .DESCRIPTION
-    Follows the App deployment standard v2.1, section 3.1 (https://github.com/dgtvan/local-app-deployment-strategy).
+    Follows the App deployment standard v2.2, section 3.1 (https://github.com/dgtvan/local-app-deployment-strategy).
     Builds whatever is in the working directory. Touches nothing outside the repo.
 
     Exit codes: 0 built, 1 error.

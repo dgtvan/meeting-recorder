@@ -5,7 +5,7 @@ See README.md for features and design. `<AppId>` is `MeetingRecorder`.
 
 ## Deployment
 
-This app follows the App deployment standard v2.1
+This app follows the App deployment standard v2.2
 (https://github.com/dgtvan/local-app-deployment-strategy).
 
 After every change to the app that builds cleanly, deploy it (sandbox disabled):

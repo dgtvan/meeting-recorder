@@ -3,9 +3,10 @@
     Removes Meeting Recorder for the current account.
 
 .DESCRIPTION
-    Follows the App deployment standard v2.1, section 3.3 (https://github.com/dgtvan/local-app-deployment-strategy).
-    Stops the app, removes the start-at-sign-in entry, the Start Menu shortcut and %LOCALAPPDATA%\MeetingRecorder\app.
-    Settings, logs (%LOCALAPPDATA%\MeetingRecorder\data) and recordings are never deleted. Succeeds and does nothing
+    Follows the App deployment standard v2.2, section 3.3 (https://github.com/dgtvan/local-app-deployment-strategy).
+    Stops the app, removes the start-at-sign-in entry, the Start Menu shortcut and
+    %LOCALAPPDATA%\VanDang\MeetingRecorder\app. Settings, logs (%LOCALAPPDATA%\VanDang\MeetingRecorder\data) and
+    recordings are never deleted. Succeeds and does nothing
     when the app isn't installed.
 
     Exit codes: 0 removed, 1 error, 3 refused because the app is busy (a recording is starting, running or saving)
@@ -24,7 +25,8 @@ $ErrorActionPreference = 'Stop'
 $AppId    = 'MeetingRecorder'
 $AppName  = 'Meeting Recorder'
 $ExeName  = "$AppId.exe"
-$Root     = Join-Path $env:LOCALAPPDATA $AppId
+$Publisher = 'VanDang'
+$Root     = Join-Path $env:LOCALAPPDATA "$Publisher\$AppId"
 $AppDir   = Join-Path $Root 'app'
 $DataDir  = Join-Path $Root 'data'
 $RunKey   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -104,12 +106,14 @@ Remove-Item $Shortcut -Force -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $AppId -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) "$AppName.lnk") -Force -ErrorAction SilentlyContinue
 
-# 3. App folder, and the root folder when nothing else is left in it
+# 3. App folder, then the app's and the publisher's folders when nothing else is left in them
 if (Test-Path $AppDir) {
     Write-Step "Removing $AppDir"
     Remove-Item $AppDir -Recurse -Force
 }
-if ((Test-Path $Root) -and -not (Get-ChildItem $Root -Force)) { Remove-Item $Root -Force }
+foreach ($dir in $Root, (Split-Path -Parent $Root)) {
+    if ((Test-Path $dir) -and -not (Get-ChildItem $dir -Force)) { Remove-Item $dir -Force }
+}
 
 # 4. Data is kept
 if (-not $NoDataWarning) {

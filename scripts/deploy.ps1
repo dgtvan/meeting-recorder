@@ -3,7 +3,7 @@
     Builds Meeting Recorder, uninstalls it and installs the new build for the current account.
 
 .DESCRIPTION
-    Follows the App deployment standard v2.1, section 3.4 (https://github.com/dgtvan/local-app-deployment-strategy).
+    Follows the App deployment standard v2.2, section 3.4 (https://github.com/dgtvan/local-app-deployment-strategy).
     Stops at the first failure; a failed build stops it before anything is uninstalled.
 
     Exit codes: 0 installed and running, 1 error, 3 refused because the app is busy (a recording is starting,

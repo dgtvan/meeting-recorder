@@ -1,7 +1,7 @@
 namespace MeetingRecorder;
 
 /// <summary>
-/// Where the app keeps its data: the folder given by <c>--data-dir</c> (App deployment standard v2.1, section 4.1).
+/// Where the app keeps its data: the folder given by <c>--data-dir</c> (App deployment standard v2.2, section 4.1).
 /// There is no default; every mode that reads or writes data must set it first.
 /// </summary>
 static class AppPaths

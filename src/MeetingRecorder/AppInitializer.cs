@@ -1,7 +1,7 @@
 namespace MeetingRecorder;
 
 /// <summary>
-/// Everything the app needs before it can work, run on every start (App deployment standard v2.1, section 4.2).
+/// Everything the app needs before it can work, run on every start (App deployment standard v2.2, section 4.2).
 /// The installer deliberately does none of this, so fresh installs, reinstalls and sign-ins share one path.
 /// </summary>
 static class AppInitializer

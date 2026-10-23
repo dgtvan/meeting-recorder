@@ -3,9 +3,9 @@
     Installs the build in dist\ for the current account.
 
 .DESCRIPTION
-    Follows the App deployment standard v2.1, section 3.2 (https://github.com/dgtvan/local-app-deployment-strategy).
-    Copies dist\ to %LOCALAPPDATA%\MeetingRecorder\app, starts it at sign-in (HKCU Run) and from the Start Menu, and
-    starts it. It does no app initialization (the app does that itself at startup) and never touches the data
+    Follows the App deployment standard v2.2, section 3.2 (https://github.com/dgtvan/local-app-deployment-strategy).
+    Copies dist\ to %LOCALAPPDATA%\VanDang\MeetingRecorder\app, starts it at sign-in (HKCU Run) and from the Start
+    Menu, and starts it. It does no app initialization (the app does that itself at startup) and never touches the data
     folder. Re-running it is safe.
 
     Exit codes: 0 installed (and started unless -NoStart), 1 error, 3 refused because the app is busy (a recording
@@ -25,7 +25,8 @@ $AppId      = 'MeetingRecorder'
 $AppName    = 'Meeting Recorder'
 $ExeName    = "$AppId.exe"
 $Dist       = Join-Path (Split-Path -Parent $PSScriptRoot) 'dist'
-$Root       = Join-Path $env:LOCALAPPDATA $AppId
+$Publisher  = 'VanDang'
+$Root       = Join-Path $env:LOCALAPPDATA "$Publisher\$AppId"
 $AppDir     = Join-Path $Root 'app'
 $DataDir    = Join-Path $Root 'data'
 $ExePath    = Join-Path $AppDir $ExeName
@@ -116,8 +117,8 @@ if (-not ($vc -and $vc.Installed -eq 1)) {
 Stop-App
 
 # 4. Copy. The guard makes sure a wrong path can never mirror over the data folder.
-if (-not $AppDir.TrimEnd('\').EndsWith("\$AppId\app", [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to install into $AppDir (it must end in \$AppId\app)."
+if (-not $AppDir.TrimEnd('\').EndsWith("\$Publisher\$AppId\app", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to install into $AppDir (it must end in \$Publisher\$AppId\app)."
 }
 Write-Step "Installing to $AppDir"
 New-Item $AppDir -ItemType Directory -Force | Out-Null
@@ -136,7 +137,7 @@ $link.WorkingDirectory = $AppDir
 $link.Description = 'Record a window or the screen with separate system and microphone audio'
 $link.Save()
 
-# 6. Entries from earlier install methods (standard v1.x and before). Their data is left for the app to copy.
+# 6. Entries from earlier install methods (standard v2.1 and before). Their data is left where it is.
 Unregister-ScheduledTask -TaskName $AppId -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item (Join-Path ([Environment]::GetFolderPath('Startup')) "$AppName.lnk") -Force -ErrorAction SilentlyContinue
 Remove-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppId" -Recurse -Force -ErrorAction SilentlyContinue
@@ -144,6 +145,11 @@ $legacyInstall = Join-Path $env:LOCALAPPDATA "Programs\$AppId"
 if (Test-Path $legacyInstall) {
     Write-Step "Removing the old install in $legacyInstall"
     Remove-Item $legacyInstall -Recurse -Force
+}
+$legacyAppDir = Join-Path $env:LOCALAPPDATA "$AppId\app"
+if (Test-Path $legacyAppDir) {
+    Write-Step "Removing the old install in $legacyAppDir"
+    Remove-Item $legacyAppDir -Recurse -Force
 }
 
 # 7. Start
