@@ -74,7 +74,8 @@ With *Auto-record Teams meetings* ticked, the app records the meeting window by 
 - **Start:** Teams has been using a microphone for about 5 s (it does so only during a call, even while muted) and
   its meeting window is open (the separate window titled "*meeting name* | Microsoft Teams"). The recording is
   named after the meeting.
-- **Stop:** about 12 s after Teams stops using the microphone, or as soon as the meeting window closes.
+- **Stop:** within about 3 s of the meeting window closing (Teams closes it as the call ends), or about 12 s after
+  Teams stops using the microphone if the window stays open.
 - Stopping an automatic recording by hand keeps it stopped for the rest of that call. A recording you started
   yourself is never stopped automatically, and nothing starts while another recording is running.
 - While you share your screen, Teams minimizes the meeting window, so the video shows the last frame

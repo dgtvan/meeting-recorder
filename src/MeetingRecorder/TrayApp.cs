@@ -47,6 +47,7 @@ sealed class TrayApp : ApplicationContext
     // One automatic recording per call: after it is stopped by hand or fails, wait for the next call.
     private bool _autoTriedThisCall;
     private bool _recordingIsAuto;
+    private IntPtr _autoWindow;
     private int _spinnerFrame;
     private readonly List<string> _problems = [];
     private readonly SelfUpdater _updater = new();
@@ -250,10 +251,17 @@ sealed class TrayApp : ApplicationContext
 
     /// <summary>
     /// Starts recording the meeting window once a Teams call has been seen for a few seconds, and stops a recording
-    /// it started once the call has been gone for a few seconds.
+    /// it started as soon as the meeting window closes, or once the call has been gone for a few seconds.
     /// </summary>
     private void CheckTeams()
     {
+        // Teams closes the meeting window the moment the call ends, so this is the quickest end signal.
+        if (_recordingIsAuto && _state is (State.Recording or State.Starting) && !WindowList.IsAlive(_autoWindow))
+        {
+            StopRecording();
+            return;
+        }
+
         bool inCall;
         try
         {
@@ -271,7 +279,7 @@ sealed class TrayApp : ApplicationContext
             if (++_noCallChecks < CallEndedChecks)
                 return;
             _autoTriedThisCall = false;
-            if (_recordingIsAuto && _state is State.Recording or State.Starting)
+            if (_recordingIsAuto && _state is (State.Recording or State.Starting))
                 StopRecording();
             return;
         }
@@ -283,6 +291,7 @@ sealed class TrayApp : ApplicationContext
             return;
 
         _autoTriedThisCall = true;
+        _autoWindow = window.Handle;
         StartRecording(new RecordingTarget(window.Title, window.Handle, null), automatic: true);
         if (_session != null)
             ShowBalloon("Recording Teams meeting", $"{window.Title}\nStops by itself when the meeting ends.", ToolTipIcon.Info);

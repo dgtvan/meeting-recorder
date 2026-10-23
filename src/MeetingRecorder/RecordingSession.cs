@@ -173,6 +173,24 @@ sealed class RecordingSession
             MouseOptions = new MouseOptions { IsMousePointerEnabled = _settings.CaptureMouseCursor },
         };
 
+        try
+        {
+            Record(options);
+        }
+        catch (Exception ex) when (_videoAudio)
+        {
+            // Audio sources are checked when recording starts; the video must not depend on them.
+            _recorder?.Dispose();
+            _recorder = null;
+            _videoAudio = false;
+            Warning?.Invoke(NoVideoSoundWarning(ex.Message));
+            options.AudioOptions = VideoAudioOptions();
+            Record(options);
+        }
+    }
+
+    private void Record(RecorderOptions options)
+    {
         var recorder = Recorder.CreateRecorder(options);
         _recorder = recorder;
         // Events from a recorder that was replaced by the fallback are ignored.
@@ -181,6 +199,9 @@ sealed class RecordingSession
         recorder.OnRecordingFailed += (_, e) => _ui.Post(_ => { if (_recorder == recorder) OnVideoFailed(e.Error); }, null);
         recorder.Record(Path.Combine(FolderPath, TempFileName(VideoFileName)));
     }
+
+    private static string NoVideoSoundWarning(string error) =>
+        $"The video has no sound this time (the separate audio files are still recorded): {error}";
 
     private void OnVideoFailed(string error)
     {
@@ -215,7 +236,7 @@ sealed class RecordingSession
         _recorder = null;
         _tracker?.Dispose();
         _tracker = null;
-        Warning?.Invoke($"The video has no sound this time (the separate audio files are still recorded): {error}");
+        Warning?.Invoke(NoVideoSoundWarning(error));
         try
         {
             Start();
@@ -232,10 +253,10 @@ sealed class RecordingSession
         var sources = new List<AudioSourceBase>();
         if (_videoAudio)
         {
-            if (VideoAudioDevice(_settings.SystemAudioDeviceId) is { } system)
-                sources.Add(system.Length == 0 ? new LoopbackAudioSource() : new LoopbackAudioSource(system));
-            if (VideoAudioDevice(_settings.MicrophoneDeviceId) is { } mic)
-                sources.Add(mic.Length == 0 ? new CaptureAudioSource() : new CaptureAudioSource(mic));
+            if (VideoAudioDevice(DataFlow.Render, _settings.SystemAudioDeviceId) is { } system)
+                sources.Add(new LoopbackAudioSource(system));
+            if (VideoAudioDevice(DataFlow.Capture, _settings.MicrophoneDeviceId) is { } mic)
+                sources.Add(new CaptureAudioSource(mic));
         }
         return new AudioOptions
         {
@@ -247,25 +268,31 @@ sealed class RecordingSession
     }
 
     /// <summary>
-    /// The device id to give the recorder: null when the source is off, "" for the Windows default (also used when
-    /// the chosen device is gone, like the separate audio files do).
+    /// The endpoint id to give the recorder, which needs a real id (an empty one throws): the chosen device, or the
+    /// Windows default when that is chosen or the device is gone, like the separate audio files do. Null when the
+    /// source is off or there is no such device.
     /// </summary>
-    private static string? VideoAudioDevice(string deviceId)
+    private static string? VideoAudioDevice(DataFlow flow, string deviceId)
     {
         if (deviceId == AppSettings.DisabledDevice)
             return null;
-        if (deviceId == AppSettings.DefaultDevice)
-            return "";
-        try
+        using var enumerator = new MMDeviceEnumerator();
+        if (deviceId != AppSettings.DefaultDevice)
         {
-            using var enumerator = new MMDeviceEnumerator();
-            using var device = enumerator.GetDevice(deviceId);
-            return device.State == DeviceState.Active ? deviceId : "";
+            try
+            {
+                using var device = enumerator.GetDevice(deviceId);
+                if (device.State == DeviceState.Active)
+                    return deviceId;
+            }
+            catch (COMException)
+            {
+            }
         }
-        catch (COMException)
-        {
-            return "";
-        }
+        if (!enumerator.TryGetDefaultAudioEndpoint(flow, Role.Console, out var fallback))
+            return null;
+        using (fallback)
+            return fallback!.ID;
     }
 
     private static ScreenRect ToScreenRect(Rectangle r) => new(r.X, r.Y, r.Width, r.Height);
