@@ -135,7 +135,13 @@ sealed class RecordingSession
     private void StartVideo(RecordingSourceBase source, Rectangle? crop)
     {
         if (source is WindowRecordingSource window)
+        {
             window.IsCursorCaptureEnabled = _settings.CaptureMouseCursor;
+            // Windows' own capture border flashes as it hides and redraws it; RecordingOverlay draws a steady one.
+            // Turning it off needs Windows 11.
+            if (Environment.OSVersion.Version.Build >= 22000)
+                window.IsBorderRequired = false;
+        }
         else if (source is DisplayRecordingSource display)
             display.IsCursorCaptureEnabled = _settings.CaptureMouseCursor;
 

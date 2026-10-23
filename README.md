@@ -96,6 +96,12 @@ anything on top of the window is recorded too, and the crop stays on the display
 
 Minimized windows are restored when recording starts.
 
+While a window is recorded, a red border surrounds it and a **● Recording** label (the dot pulses) sits above its
+top-left corner; on a maximized window both are drawn just inside its edges. They follow the window, hide while
+it's minimized, and stay behind windows that cover it. They are left out of every screen capture, so they don't
+appear in the recording, in screenshots or in a screen share. On Windows 11 this replaces Windows' own yellow
+capture border, which flashes.
+
 ## Settings
 
 `%LOCALAPPDATA%\MeetingRecorder\data\settings.json` (the data folder given by `--data-dir`), created with defaults when

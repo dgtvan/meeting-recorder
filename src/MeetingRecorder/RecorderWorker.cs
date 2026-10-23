@@ -56,11 +56,22 @@ static class RecorderWorker
         }
 
         Send("folder", session.FolderPath);
-        session.Started += _ => Send("started");
+        RecordingOverlay? overlay = null;
+        session.Started += _ =>
+        {
+            if (target.WindowHandle != IntPtr.Zero)
+                overlay = new RecordingOverlay(target.WindowHandle);
+            Send("started");
+        };
         session.Warning += warning => Send("warning", warning);
-        session.Stopping += () => Send("stopping");
+        session.Stopping += () =>
+        {
+            overlay?.Dispose();
+            Send("stopping");
+        };
         session.Finished += (_, error) =>
         {
+            overlay?.Dispose();
             if (RecordingSession.GraphicsCaptureUnavailable)
                 Send("fallback");
             if (session.EndNote != null)
