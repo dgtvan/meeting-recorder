@@ -30,6 +30,7 @@ sealed class RecordingOverlay : IDisposable
 
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     private const int DWMWA_CLOAKED = 14;
+    private const int DWMWA_VISIBLE_FRAME_BORDER_THICKNESS = 37;
     private const int GWL_EXSTYLE = -20;
     private const long WS_EX_TOPMOST = 0x8;
     private const uint GW_HWNDPREV = 3;
@@ -137,7 +138,11 @@ sealed class RecordingOverlay : IDisposable
         // Kept on the target's monitor: a maximized window's border is drawn just inside its edges instead of
         // spilling onto the next display.
         var outer = Rectangle.FromLTRB(frame.Left, frame.Top, frame.Right, frame.Bottom);
-        outer.Inflate(thickness, thickness);
+        // Windows 11 draws its own thin border inside the frame bounds, which looks like a gap next to ours (dark in
+        // apps like Teams), so ours covers it.
+        int windowsBorder = DwmGetWindowAttribute(_target, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, out int visibleBorder, sizeof(int)) == 0
+            ? visibleBorder : 0;
+        outer.Inflate(thickness - windowsBorder, thickness - windowsBorder);
         outer.Intersect(monitor);
         if (outer.Width <= 2 * thickness || outer.Height <= 2 * thickness)
         {
