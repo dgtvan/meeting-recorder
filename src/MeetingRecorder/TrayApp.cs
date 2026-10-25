@@ -9,6 +9,7 @@ namespace MeetingRecorder;
 /// and a context menu to start, stop and browse recordings.
 /// </summary>
 /// <remarks>
+/// Several recordings can run at once, each of a different window or display; the recording icon shows how many.
 /// Anything the user must act on (a failed recording, a source that stopped, low disk space) switches the icon
 /// to a warning that stays until the user opens the details, so it isn't missed when notifications are muted.
 /// </remarks>
@@ -26,7 +27,24 @@ sealed class TrayApp : ApplicationContext
     private const int CallEndedChecks = 4;
     private static readonly TimeSpan MinAutoRecording = TimeSpan.FromSeconds(30);
 
-    private enum State { Idle, Starting, Recording, Processing }
+    private enum Phase { Starting, Recording, Saving }
+
+    /// <summary>A recording started from the tray, from the moment it is launched until its worker exits.</summary>
+    private sealed class ActiveRecording(RecordingProcess process, RecordingTarget target, bool automatic)
+    {
+        public RecordingProcess Process { get; } = process;
+        public RecordingTarget Target { get; } = target;
+        public bool IsAuto { get; } = automatic;
+        public Phase Phase { get; private set; } = Phase.Starting;
+        public DateTime PhaseSince { get; private set; } = DateTime.UtcNow;
+        public bool IsCapturing => Phase is Phase.Starting or Phase.Recording;
+
+        public void Enter(Phase phase)
+        {
+            Phase = phase;
+            PhaseSince = DateTime.UtcNow;
+        }
+    }
 
     private readonly AppSettings _settings;
     private readonly NotifyIcon _tray;
@@ -45,19 +63,15 @@ sealed class TrayApp : ApplicationContext
     private readonly System.Windows.Forms.Timer _teamsTimer = new() { Interval = TeamsCheckMilliseconds };
     private int _callChecks;
     private int _noCallChecks;
-    // One automatic recording per call: after it is stopped by hand or fails, wait for the next call.
-    private bool _autoTriedThisCall;
-    private bool _recordingIsAuto;
-    private IntPtr _autoWindow;
+    // Meeting windows auto-recorded during this call: one that was stopped by hand or failed waits for the next call.
+    private readonly HashSet<IntPtr> _autoTried = [];
     private int _animationFrame;
     private readonly List<string> _problems = [];
     private readonly EventWaitHandle _exitRequest = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-Exit");
     private readonly EventWaitHandle _exitRefused = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-ExitRefused");
     private readonly SynchronizationContext _ui;
-    private State _state = State.Idle;
-    private DateTime _stateSince = DateTime.UtcNow;
+    private readonly List<ActiveRecording> _recordings = [];
     private bool _lowDiskReported;
-    private RecordingProcess? _session;
     private string? _lastFolder;
     private bool _exitAfterStop;
 
@@ -78,7 +92,12 @@ sealed class TrayApp : ApplicationContext
         _startItem.DropDownItems.Add(new ToolStripMenuItem("(loading)"));
         _startItem.DropDownOpening += (_, _) => BuildStartMenu();
 
-        _stopItem = new ToolStripMenuItem("Stop recording", null, (_, _) => StopRecording());
+        // With several recordings this item opens a submenu instead, so a click on it must not stop them all.
+        _stopItem = new ToolStripMenuItem("Stop recording", null, (sender, _) =>
+        {
+            if (sender is ToolStripMenuItem { HasDropDownItems: false })
+                StopAll();
+        });
 
         _recordingsItem = new ToolStripMenuItem("Recordings");
         _recordingsItem.DropDownItems.Add(new ToolStripMenuItem("(loading)"));
@@ -99,7 +118,7 @@ sealed class TrayApp : ApplicationContext
         _autoTeamsItem = new ToolStripMenuItem("Auto-record Teams meetings", null, (_, _) => ToggleAutoTeams())
         {
             Checked = _settings.AutoRecordTeams,
-            ToolTipText = "Records the meeting window when a Teams call or meeting starts and stops when it ends.",
+            ToolTipText = "Records each Teams call or meeting window when the call starts and stops when it ends.",
         };
 
         _menu.Items.AddRange(
@@ -126,11 +145,11 @@ sealed class TrayApp : ApplicationContext
         {
             if (e.Button != MouseButtons.Left)
                 return;
-            if (_state == State.Recording)
-                StopRecording();
+            if (_recordings.Any(r => r.IsCapturing))
+                StopAll();
             else if (_problems.Count > 0)
                 ShowProblems();
-            else if (_state == State.Idle)
+            else if (_recordings.Count == 0)
                 OpenFolder(_lastFolder ?? EnsureRoot());
         };
         _tray.BalloonTipClicked += (_, _) =>
@@ -147,12 +166,12 @@ sealed class TrayApp : ApplicationContext
         _animation.Tick += (_, _) =>
         {
             // A common multiple of every animation's frame count, so each one loops cleanly.
-            _animationFrame = (_animationFrame + 1) % (TrayIcons.Processing.Length * TrayIcons.Recording.Length);
+            _animationFrame = (_animationFrame + 1) % (TrayIcons.Processing.Length * TrayIcons.RecordingFrames);
             RefreshIcon();
         };
         Application.ThreadException += (_, e) => AddProblem($"Unexpected error: {e.Exception.Message}");
 
-        SetState(State.Idle);
+        RefreshState();
         foreach (string problem in dataProblems.Concat(AppInitializer.Run(_settings, settingsLoadError)))
             AddProblem(problem);
 
@@ -163,33 +182,41 @@ sealed class TrayApp : ApplicationContext
         }) { IsBackground = true, Name = "Exit request listener" }.Start();
     }
 
-    private void SetState(State state)
+    /// <summary>Updates the menu, timers and icon after a recording starts, changes phase or finishes.</summary>
+    private void RefreshState()
     {
-        _state = state;
-        _stateSince = DateTime.UtcNow;
-        _startItem.Enabled = state == State.Idle;
-        _stopItem.Enabled = state is State.Recording or State.Starting;
-        _systemAudioItem.Enabled = _microphoneItem.Enabled = _changeRootItem.Enabled = state == State.Idle;
-        _watchdog.Enabled = state != State.Idle;
-        _animationFrame = 0;
-        _animation.Enabled = state is State.Recording or State.Processing;
+        bool idle = _recordings.Count == 0;
+        _startItem.Enabled = !_exitAfterStop;
+        _systemAudioItem.Enabled = _microphoneItem.Enabled = _changeRootItem.Enabled = idle;
+        _watchdog.Enabled = !idle;
+        bool animate = _recordings.Any(r => r.Phase is Phase.Recording or Phase.Saving);
+        if (animate != _animation.Enabled)
+        {
+            _animationFrame = 0;
+            _animation.Enabled = animate;
+        }
+        BuildStopMenu();
         RefreshIcon();
     }
 
     private void RefreshIcon()
     {
         bool hasProblem = _problems.Count > 0;
-        (Icon icon, string text) = _state switch
+        int recording = _recordings.Count(r => r.Phase == Phase.Recording);
+        _tray.Icon = recording > 0 ? Frame(TrayIcons.Recording(recording, hasProblem))
+            : _recordings.Any(r => r.Phase == Phase.Starting) ? TrayIcons.Starting
+            : _recordings.Count > 0 ? Frame(TrayIcons.Processing)
+            : hasProblem ? TrayIcons.Warning
+            : TrayIcons.Idle;
+
+        string text = _recordings.Count == 0 ? "Idle" : string.Join("\n", _recordings.Select(r => r.Phase switch
         {
-            State.Recording => (Frame(hasProblem ? TrayIcons.RecordingWarning : TrayIcons.Recording),
-                $"Recording since {_session!.StartedAt:HH:mm}: {_session.TargetName}"),
-            State.Starting => (TrayIcons.Starting, "Starting recording..."),
-            State.Processing => (Frame(TrayIcons.Processing), "Saving recording... (not finished yet)"),
-            _ => (hasProblem ? TrayIcons.Warning : TrayIcons.Idle, "Idle"),
-        };
+            Phase.Starting => $"Starting: {r.Process.TargetName}",
+            Phase.Recording => $"Recording since {r.Process.StartedAt:HH:mm}: {r.Process.TargetName}",
+            _ => $"Saving (not finished yet): {r.Process.TargetName}",
+        }));
         if (hasProblem)
             text = "NEEDS ATTENTION (open the menu)\n" + text;
-        _tray.Icon = icon;
         // NotifyIcon.Text throws above 127 characters.
         _tray.Text = Truncate("Meeting Recorder\n" + text, 127);
 
@@ -203,6 +230,23 @@ sealed class TrayApp : ApplicationContext
     }
 
     private Icon Frame(Icon[] frames) => frames[_animationFrame % frames.Length];
+
+    /// <summary>One recording: "Stop recording" stops it. Several: a submenu to stop each one, or all.</summary>
+    private void BuildStopMenu()
+    {
+        var capturing = _recordings.Where(r => r.IsCapturing).ToList();
+        _stopItem.Enabled = capturing.Count > 0;
+        _stopItem.DropDownItems.Clear();
+        if (capturing.Count < 2)
+            return;
+        foreach (var recording in capturing)
+        {
+            _stopItem.DropDownItems.Add(new ToolStripMenuItem(Truncate(recording.Process.TargetName, MaxMenuTextLength), null,
+                (_, _) => StopRecording(recording)) { ToolTipText = recording.Process.TargetName });
+        }
+        _stopItem.DropDownItems.Add(new ToolStripSeparator());
+        _stopItem.DropDownItems.Add(new ToolStripMenuItem("Stop all", null, (_, _) => StopAll()));
+    }
 
     /// <summary>
     /// Records something the user must act on: logged, and the tray icon shows a warning until they look at it.
@@ -229,18 +273,21 @@ sealed class TrayApp : ApplicationContext
 
     private void CheckHealth()
     {
-        TimeSpan inState = DateTime.UtcNow - _stateSince;
-        if (_state == State.Starting && inState > StartTimeout)
-            _session?.Kill($"Recording did not start within {StartTimeout.TotalSeconds:0} seconds.");
-        else if (_state == State.Processing && _session != null && inState > SaveLimit(_session))
-            _session.Kill($"Saving did not finish within {SaveLimit(_session).TotalMinutes:0} minutes; the files may be incomplete.");
-        else if (_state == State.Recording)
+        foreach (var recording in _recordings.ToList())
+        {
+            TimeSpan inPhase = DateTime.UtcNow - recording.PhaseSince;
+            if (recording.Phase == Phase.Starting && inPhase > StartTimeout)
+                recording.Process.Kill($"Recording did not start within {StartTimeout.TotalSeconds:0} seconds.");
+            else if (recording.Phase == Phase.Saving && inPhase > SaveLimit(recording))
+                recording.Process.Kill($"Saving did not finish within {SaveLimit(recording).TotalMinutes:0} minutes; the files may be incomplete.");
+        }
+        if (_recordings.Any(r => r.Phase == Phase.Recording))
             CheckDiskSpace();
     }
 
     /// <summary>Converting the audio after stop takes about a second per minute recorded, so long recordings get longer.</summary>
-    private TimeSpan SaveLimit(RecordingProcess session) =>
-        SaveTimeout + TimeSpan.FromSeconds(Math.Max(0, (_stateSince.ToLocalTime() - session.StartedAt).TotalMinutes) * 5);
+    private static TimeSpan SaveLimit(ActiveRecording recording) =>
+        SaveTimeout + TimeSpan.FromSeconds(Math.Max(0, (recording.PhaseSince.ToLocalTime() - recording.Process.StartedAt).TotalMinutes) * 5);
 
     private void CheckDiskSpace()
     {
@@ -262,20 +309,17 @@ sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// Starts recording the meeting window once a Teams call has been seen for a few seconds, and stops a recording
-    /// it started as soon as the meeting window closes, or once the call has been gone for a few seconds.
+    /// Starts recording every meeting window once a Teams call has been seen for a few seconds (a call on hold keeps
+    /// its own window, so it is recorded too), and stops a recording it started as soon as its window closes, or once
+    /// no call has been seen for a few seconds.
     /// </summary>
     private void CheckTeams()
     {
         // Teams closes the meeting window the moment the call ends, so this is the quickest end signal. It also
         // replaces the window mid-call (the pre-join screen, which already holds the microphone, becomes the meeting
-        // window on Join), so once this recording is saved, a call that is still active is recorded again.
-        if (_recordingIsAuto && _state is (State.Recording or State.Starting) && !WindowList.IsAlive(_autoWindow))
-        {
-            _autoTriedThisCall = false;
-            StopRecording();
-            return;
-        }
+        // window on Join); the new window is recorded below like any other.
+        foreach (var recording in _recordings.Where(r => r.IsAuto && r.IsCapturing && !WindowList.IsAlive(r.Target.WindowHandle)).ToList())
+            StopRecording(recording);
 
         bool inCall;
         try
@@ -293,23 +337,22 @@ sealed class TrayApp : ApplicationContext
             _callChecks = 0;
             if (++_noCallChecks < CallEndedChecks)
                 return;
-            _autoTriedThisCall = false;
-            if (_recordingIsAuto && _state is (State.Recording or State.Starting))
-                StopRecording();
+            _autoTried.Clear();
+            foreach (var recording in _recordings.Where(r => r.IsAuto && r.IsCapturing).ToList())
+                StopRecording(recording);
             return;
         }
 
         _noCallChecks = 0;
-        if (++_callChecks < CallStartedChecks || _autoTriedThisCall || _state != State.Idle || _exitAfterStop)
+        if (++_callChecks < CallStartedChecks || _exitAfterStop)
             return;
-        if (TeamsMeeting.FindMeetingWindow() is not { } window)
-            return;
-
-        _autoTriedThisCall = true;
-        _autoWindow = window.Handle;
-        StartRecording(new RecordingTarget(window.Title, window.Handle, null), automatic: true);
-        if (_session != null)
-            ShowBalloon("Recording Teams meeting", $"{window.Title}\nStops by itself when the meeting ends.", ToolTipIcon.Info);
+        foreach (var window in TeamsMeeting.FindMeetingWindows())
+        {
+            if (!_autoTried.Add(window.Handle))
+                continue;
+            if (StartRecording(new RecordingTarget(window.Title, window.Handle, null), automatic: true))
+                ShowBalloon("Recording Teams meeting", $"{window.Title}\nStops by itself when the meeting ends.", ToolTipIcon.Info);
+        }
     }
 
     private void ToggleAutoTeams()
@@ -335,7 +378,7 @@ sealed class TrayApp : ApplicationContext
         var screens = Screen.AllScreens;
         if (screens.Length == 1)
         {
-            items.Add(new ToolStripMenuItem("Full screen", null, (_, _) => StartRecording(RecordingTarget.ForDisplay(screens[0].DeviceName))));
+            items.Add(StartItem("Full screen", RecordingTarget.ForDisplay(screens[0].DeviceName)));
         }
         else
         {
@@ -343,7 +386,7 @@ sealed class TrayApp : ApplicationContext
             {
                 var screen = screens[i];
                 string label = $"Full screen: display {i + 1} ({screen.Bounds.Width}x{screen.Bounds.Height}){(screen.Primary ? ", main" : "")}";
-                items.Add(new ToolStripMenuItem(label, null, (_, _) => StartRecording(RecordingTarget.ForDisplay(screen.DeviceName))));
+                items.Add(StartItem(label, RecordingTarget.ForDisplay(screen.DeviceName)));
             }
         }
 
@@ -353,10 +396,23 @@ sealed class TrayApp : ApplicationContext
             items.Add(new ToolStripMenuItem("(no windows found)") { Enabled = false });
         foreach (var window in windows)
         {
-            items.Add(new ToolStripMenuItem(Truncate(window.Title, MaxMenuTextLength), null,
-                (_, _) => StartRecording(RecordingTarget.ForWindow(window))) { ToolTipText = window.Title });
+            var item = StartItem(Truncate(window.Title, MaxMenuTextLength), RecordingTarget.ForWindow(window));
+            item.ToolTipText = window.Title;
+            items.Add(item);
         }
     }
+
+    /// <summary>A "Start recording" entry; ticked and disabled while that target is already being recorded.</summary>
+    private ToolStripMenuItem StartItem(string label, RecordingTarget target)
+    {
+        bool busy = IsBeingRecorded(target);
+        return new ToolStripMenuItem(label, null, (_, _) => StartRecording(target)) { Checked = busy, Enabled = !busy };
+    }
+
+    private bool IsBeingRecorded(RecordingTarget target) => _recordings.Any(r => r.IsCapturing
+        && (target.WindowHandle != IntPtr.Zero
+            ? r.Target.WindowHandle == target.WindowHandle
+            : target.DisplayDeviceName != null && r.Target.DisplayDeviceName == target.DisplayDeviceName));
 
     private void BuildRecordingsMenu()
     {
@@ -373,12 +429,13 @@ sealed class TrayApp : ApplicationContext
         if (recent.Count == 0)
             items.Add(new ToolStripMenuItem("(no recordings yet)") { Enabled = false });
 
-        string? activeFolder = _state == State.Idle ? null : _session?.FolderPath;
         foreach (var folder in recent)
         {
-            if (string.Equals(folder.FullName.TrimEnd('\\'), activeFolder?.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            var active = _recordings.FirstOrDefault(r => string.Equals(folder.FullName.TrimEnd('\\'),
+                r.Process.FolderPath?.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+            if (active != null)
             {
-                string status = _state == State.Processing ? "saving" : "recording";
+                string status = active.Phase == Phase.Saving ? "saving" : "recording";
                 items.Add(new ToolStripMenuItem($"{Truncate(folder.Name, MaxMenuTextLength)} ({status})") { Enabled = false });
                 continue;
             }
@@ -437,7 +494,7 @@ sealed class TrayApp : ApplicationContext
 
     private void ChangeRecordingsRoot()
     {
-        if (_state != State.Idle)
+        if (_recordings.Count > 0)
             return;
         using var dialog = new FolderBrowserDialog
         {
@@ -469,55 +526,83 @@ sealed class TrayApp : ApplicationContext
         ShowBalloon("Recordings folder changed", $"New recordings go to {_settings.RecordingsRoot}. Existing ones stay where they are.", ToolTipIcon.Info);
     }
 
-    private void StartRecording(RecordingTarget target, bool automatic = false)
+    /// <summary>
+    /// Starts recording <paramref name="target"/> next to any recordings already running. Returns false when it
+    /// isn't started: the target is already being recorded, its window is gone, the app is exiting, or it failed.
+    /// </summary>
+    private bool StartRecording(RecordingTarget target, bool automatic = false)
     {
-        if (_state != State.Idle)
-            return;
-        _recordingIsAuto = automatic;
+        if (_exitAfterStop || IsBeingRecorded(target))
+            return false;
         if (target.WindowHandle != IntPtr.Zero && !WindowList.IsAlive(target.WindowHandle))
         {
-            ShowBalloon("Window is gone", "That window was closed. Pick another one.", ToolTipIcon.Info);
-            return;
+            if (!automatic)
+                ShowBalloon("Window is gone", "That window was closed. Pick another one.", ToolTipIcon.Info);
+            return false;
         }
 
+        ActiveRecording? recording = null;
         try
         {
-            _session = new RecordingProcess(_ui, target);
-            _session.Started += _ => SetState(State.Recording);
-            _session.Warning += (_, text) => AddProblem(text);
-            _session.Stopping += _ => { if (_state is State.Recording or State.Starting) SetState(State.Processing); };
-            _session.Finished += OnSessionFinished;
-            _lowDiskReported = false;
-            SetState(State.Starting);
-            _session.Start();
+            var process = new RecordingProcess(_ui, target);
+            var added = recording = new ActiveRecording(process, target, automatic);
+            process.Started += _ =>
+            {
+                if (added.Phase != Phase.Starting)
+                    return;
+                added.Enter(Phase.Recording);
+                RefreshState();
+            };
+            process.Warning += (_, text) => AddProblem(text);
+            process.Stopping += _ =>
+            {
+                if (!added.IsCapturing)
+                    return;
+                added.Enter(Phase.Saving);
+                RefreshState();
+            };
+            process.Finished += (_, error) => OnRecordingFinished(added, error);
+            if (_recordings.Count == 0)
+                _lowDiskReported = false;
+            _recordings.Add(added);
+            RefreshState();
+            process.Start();
             CheckDiskSpace();
+            return true;
         }
         catch (Exception ex)
         {
-            _session = null;
-            SetState(State.Idle);
+            if (recording != null)
+                _recordings.Remove(recording);
+            RefreshState();
             AddProblem($"Could not start recording: {ex.Message}");
+            return false;
         }
     }
 
-    private void StopRecording()
+    private void StopRecording(ActiveRecording recording)
     {
-        if (_session == null || _state is not (State.Recording or State.Starting))
+        if (!recording.IsCapturing)
             return;
-        SetState(State.Processing);
-        _session.Stop();
+        recording.Enter(Phase.Saving);
+        RefreshState();
+        recording.Process.Stop();
     }
 
-    private void OnSessionFinished(RecordingProcess session, string? error)
+    private void StopAll()
     {
-        bool wasAuto = _recordingIsAuto;
-        _session = null;
-        _recordingIsAuto = false;
-        SetState(State.Idle);
-        if (wasAuto && error == null && DropShortCall(session))
+        foreach (var recording in _recordings.Where(r => r.IsCapturing).ToList())
+            StopRecording(recording);
+    }
+
+    private void OnRecordingFinished(ActiveRecording recording, string? error)
+    {
+        RecordingProcess session = recording.Process;
+        _recordings.Remove(recording);
+        RefreshState();
+        if (recording.IsAuto && error == null && DropShortCall(session))
         {
-            if (_exitAfterStop)
-                ExitNow();
+            ExitIfDone();
             return;
         }
 
@@ -529,7 +614,7 @@ sealed class TrayApp : ApplicationContext
 
         if (_exitAfterStop)
         {
-            ExitNow();
+            ExitIfDone();
             return;
         }
 
@@ -569,7 +654,7 @@ sealed class TrayApp : ApplicationContext
     /// </summary>
     private void OnExitRequested()
     {
-        if (_state == State.Idle)
+        if (_recordings.Count == 0)
         {
             ExitNow();
             return;
@@ -582,13 +667,17 @@ sealed class TrayApp : ApplicationContext
 
     private void Exit()
     {
-        if (_state == State.Idle)
-        {
-            ExitNow();
-            return;
-        }
         _exitAfterStop = true;
-        StopRecording();
+        StopAll();
+        RefreshState();
+        ExitIfDone();
+    }
+
+    /// <summary>Exits once the last recording is saved, after Exit was chosen while recording.</summary>
+    private void ExitIfDone()
+    {
+        if (_exitAfterStop && _recordings.Count == 0)
+            ExitNow();
     }
 
     private void ExitNow()

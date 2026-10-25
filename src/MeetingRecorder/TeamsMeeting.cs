@@ -55,25 +55,24 @@ static class TeamsMeeting
         return false;
     }
 
-    /// <summary>The meeting or call window, named after the meeting; null when Teams shows none.</summary>
-    public static WindowInfo? FindMeetingWindow()
+    /// <summary>
+    /// Every open meeting or call window, named after the meeting; empty when Teams shows none. A second call (one
+    /// on hold, or one being answered) has its own window.
+    /// </summary>
+    public static List<WindowInfo> FindMeetingWindows()
     {
         var teamsProcessIds = Process.GetProcessesByName(ProcessName).Select(p =>
         {
             using (p)
                 return (uint)p.Id;
         }).ToHashSet();
-        WindowInfo? found = null;
+        var found = new List<WindowInfo>();
         EnumWindows((hwnd, _) =>
         {
             GetWindowThreadProcessId(hwnd, out uint processId);
-            if (!teamsProcessIds.Contains(processId) || !IsWindowVisible(hwnd) || ClassName(hwnd) != WindowClass)
-                return true;
-            if (MeetingName(Title(hwnd)) is { } name)
-            {
-                found = new WindowInfo(hwnd, name);
-                return false;
-            }
+            if (teamsProcessIds.Contains(processId) && IsWindowVisible(hwnd) && ClassName(hwnd) == WindowClass
+                && MeetingName(Title(hwnd)) is { } name)
+                found.Add(new WindowInfo(hwnd, name));
             return true;
         }, IntPtr.Zero);
         return found;

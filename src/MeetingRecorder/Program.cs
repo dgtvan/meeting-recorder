@@ -17,7 +17,11 @@ static class Program
         {
             // Diagnostic: what Teams auto-record would see right now. Captures nothing and needs no data folder.
             Console.Out.WriteLine(TeamsMeeting.IsCallActive() ? "call active" : "call none");
-            Console.Out.WriteLine(TeamsMeeting.FindMeetingWindow() is { } window ? $"window {window.Handle} {window.Title}" : "window none");
+            var windows = TeamsMeeting.FindMeetingWindows();
+            if (windows.Count == 0)
+                Console.Out.WriteLine("window none");
+            foreach (var window in windows)
+                Console.Out.WriteLine($"window {window.Handle} {window.Title}");
             return 0;
         }
 

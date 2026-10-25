@@ -6,9 +6,13 @@ and microphone saved to **separate** audio files.
 ## Features
 
 - Tray icon shows the state: grey = idle, amber = starting, pulsing red = recording, spinning blue = saving (the
-  recording has stopped but its files aren't finished yet).
-- **Start recording**: pick *Full screen* (one entry per display) or any open window.
-- **Stop recording**: from the menu, or double-click the tray icon.
+  recording has stopped but its files aren't finished yet). With more than one recording running, the red dot
+  fills the ring and shows how many in white.
+- **Start recording**: pick *Full screen* (one entry per display) or any open window. Several windows or displays
+  can be recorded at once, each into its own folder; what is already being recorded is ticked and can't be picked
+  again. All recordings capture the same system audio and microphone.
+- **Stop recording**: from the menu (with several running, a submenu stops one of them or *Stop all*), or
+  double-click the tray icon to stop them all.
 - **Auto-record Teams meetings** (on by default): see [below](#teams-meetings).
 - **Recordings**: the 10 most recent recordings, each with *Open folder* and its files (the one being recorded
   is listed but can't be opened until it is saved); plus *Open recordings folder*.
@@ -72,20 +76,21 @@ Measurements and the reasoning behind the defaults: [docs/performance.md](docs/p
 
 ## Teams meetings
 
-With *Auto-record Teams meetings* ticked, the app records the meeting window by itself when a Microsoft Teams
-(new Teams) call or meeting starts, and stops when it ends. A notification says when it starts.
+With *Auto-record Teams meetings* ticked, the app records every meeting window by itself when a Microsoft Teams
+(new Teams) call or meeting starts, and stops each one when it ends. A notification says when one starts. When two
+calls are open at once (one on hold), each window gets its own recording, both with the same audio.
 
 - **Start:** Teams has been using a microphone for about 5 s (it does so only during a call, even while muted) and
-  its meeting window is open (the separate window titled "*meeting name* | Microsoft Teams"). The recording is
-  named after the meeting.
-- **Stop:** within about 3 s of the meeting window closing (Teams closes it as the call ends), or about 12 s after
+  a meeting window is open (the separate window titled "*meeting name* | Microsoft Teams"). Each recording is
+  named after its meeting; a meeting window that opens later during the call is recorded too.
+- **Stop:** within about 3 s of its meeting window closing (Teams closes it as the call ends), or about 12 s after
   Teams stops using the microphone if the window stays open.
 - If Teams replaces the meeting window during the call (the pre-join screen becomes the meeting window when you
   join), the recording is saved and a new one starts for the rest of the call.
 - Automatic recordings shorter than 30 s (a pre-join screen, a call left at once) are deleted after saving; each one
   is noted in `warnings.log` without raising a warning.
-- Stopping an automatic recording by hand keeps it stopped for the rest of that call. A recording you started
-  yourself is never stopped automatically, and nothing starts while another recording is running.
+- Stopping an automatic recording by hand keeps that window unrecorded for the rest of the call. A recording you
+  started yourself is never stopped automatically; if it is of a meeting window, no automatic one starts for it.
 - While you share your screen, Teams minimizes the meeting window, so the video shows the last frame
   until it's restored. The audio is recorded throughout.
 - Make sure everyone in the meeting knows it's being recorded: unlike Teams' own recording, this app doesn't tell
