@@ -11,10 +11,21 @@ namespace MeetingRecorder;
 /// </summary>
 sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayDeviceName, string? SourceFile = null)
 {
+    /// <summary>Records no video, only the separate audio files: the audio of a Teams call, which has a video per window.</summary>
+    public bool IsAudioOnly { get; init; }
+
     public static RecordingTarget ForWindow(WindowInfo window) => new(window.Title, window.Handle, null);
 
     public static RecordingTarget ForDisplay(string deviceName) => new("fullscreen", IntPtr.Zero, deviceName);
+
+    public static RecordingTarget ForAudio(string name) => new(name, IntPtr.Zero, null) { IsAudioOnly = true };
 }
+
+/// <summary>
+/// Where a recording writes: a new folder by default, or <see cref="Folder"/> when it shares one with the other
+/// recordings of a Teams call, which record a video each and leave the separate audio files to one audio-only recording.
+/// </summary>
+sealed record RecordingOutput(string? Folder = null, string VideoFileName = RecordingSession.VideoFileName, bool AudioFiles = true);
 
 /// <summary>
 /// One recording: a new folder holding video.mp4 (with system audio and microphone mixed in, for easy review) plus a
@@ -28,7 +39,7 @@ sealed class RecordingSession
     public const string SystemAudioFileName = "audio-system.wav";
     public const string MicrophoneFileName = "audio-mic.wav";
     private const string CompressedAudioExtension = ".m4a";
-    private static readonly string[] FileNames = [VideoFileName, SystemAudioFileName, MicrophoneFileName];
+    private static readonly string[] AudioFileNames = [SystemAudioFileName, MicrophoneFileName];
 
     // The lowest bitrates the Windows AAC encoder offers; transparent for meeting audio.
     private const int StereoAacBitrate = 128_000;
@@ -37,6 +48,7 @@ sealed class RecordingSession
     private readonly SynchronizationContext _ui;
     private readonly AppSettings _settings;
     private readonly RecordingTarget _target;
+    private readonly RecordingOutput _output;
     private readonly List<AudioFileRecorder> _audio = [];
 
     private Recorder? _recorder;
@@ -76,20 +88,32 @@ sealed class RecordingSession
     /// </summary>
     public static bool GraphicsCaptureUnavailable { get; set; }
 
-    private RecordingSession(SynchronizationContext ui, AppSettings settings, RecordingTarget target)
+    private RecordingSession(SynchronizationContext ui, AppSettings settings, RecordingTarget target, RecordingOutput output)
     {
         _ui = ui;
         _settings = settings;
         _target = target;
+        _output = output;
         StartedAt = DateTime.Now;
-        FolderPath = CreateFolder(settings.RecordingsRoot, StartedAt, target.Name);
+        FolderPath = output.Folder is { } folder
+            ? Directory.CreateDirectory(folder).FullName
+            : CreateFolder(settings.RecordingsRoot, StartedAt, target.Name);
     }
 
-    public static RecordingSession Create(SynchronizationContext ui, AppSettings settings, RecordingTarget target) =>
-        new(ui, settings, target);
+    public static RecordingSession Create(SynchronizationContext ui, AppSettings settings, RecordingTarget target,
+        RecordingOutput? output = null) => new(ui, settings, target, output ?? new RecordingOutput());
+
+    /// <summary>The files this recording writes, by their names before the audio is compressed.</summary>
+    private IEnumerable<string> OwnFileNames =>
+        (_target.IsAudioOnly ? [] : (string[])[_output.VideoFileName]).Concat(_output.AudioFiles ? AudioFileNames : []);
 
     public void Start()
     {
+        if (_target.IsAudioOnly)
+        {
+            StartCapturing();
+            return;
+        }
         if (_target.SourceFile != null)
         {
             StartVideo(new VideoRecordingSource(_target.SourceFile), null);
@@ -203,7 +227,7 @@ sealed class RecordingSession
         recorder.OnStatusChanged += (_, e) => _ui.Post(_ => { if (_recorder == recorder) OnVideoStatusChanged(e.Status); }, null);
         recorder.OnRecordingComplete += (_, _) => _ui.Post(_ => { if (_recorder == recorder) OnVideoEnded(null); }, null);
         recorder.OnRecordingFailed += (_, e) => _ui.Post(_ => { if (_recorder == recorder) OnVideoFailed(e.Error); }, null);
-        recorder.Record(Path.Combine(FolderPath, TempFileName(VideoFileName)));
+        recorder.Record(Path.Combine(FolderPath, TempFileName(_output.VideoFileName)));
     }
 
     private static string NoVideoSoundWarning(string error) =>
@@ -337,6 +361,8 @@ sealed class RecordingSession
         _stopRequested = true;
         StopAudio();
         _recorder?.Stop();
+        if (_target.IsAudioOnly)
+            OnVideoEnded(null);
     }
 
     private void OnVideoStatusChanged(RecorderStatus status)
@@ -345,9 +371,17 @@ sealed class RecordingSession
             return;
 
         // Audio starts with the first video frame so the files line up when played side by side.
+        StartCapturing();
+    }
+
+    private void StartCapturing()
+    {
         _videoStarted = true;
-        StartAudio(DataFlow.Render, _settings.SystemAudioDeviceId, SystemAudioFileName, "System audio");
-        StartAudio(DataFlow.Capture, _settings.MicrophoneDeviceId, MicrophoneFileName, "Microphone");
+        if (_output.AudioFiles)
+        {
+            StartAudio(DataFlow.Render, _settings.SystemAudioDeviceId, SystemAudioFileName, "System audio");
+            StartAudio(DataFlow.Capture, _settings.MicrophoneDeviceId, MicrophoneFileName, "Microphone");
+        }
         Started?.Invoke(this);
     }
 
@@ -399,20 +433,25 @@ sealed class RecordingSession
         _tracker?.Dispose();
         _recorder?.Dispose();
         _recorder = null;
-        if (_settings.CompressAudio)
+        if (_settings.CompressAudio && _output.AudioFiles)
         {
             // One after the other: converting both at once measured slower.
-            string?[] compressErrors = await Task.Run(() => ((string[])[SystemAudioFileName, MicrophoneFileName])
-                .Select(name => CompressAudio(FolderPath, name)).ToArray());
+            string?[] compressErrors = await Task.Run(() => AudioFileNames.Select(name => CompressAudio(FolderPath, name)).ToArray());
             foreach (string? compressError in compressErrors.Where(e => e != null))
                 Warning?.Invoke(compressError!);
         }
-        if (FinalizeFiles(FolderPath) is { } renameError)
+        if (FinalizeFiles(FolderPath, OwnFileNames) is { } renameError)
             Warning?.Invoke(renameError);
         if (error != null)
             DeleteFolderIfEmpty();
         Finished?.Invoke(this, error);
     }
+
+    /// <summary>
+    /// The name of the <paramref name="number"/>th video in a folder with a video per window: video.mp4, video-2.mp4, ...
+    /// </summary>
+    public static string NumberedVideoFileName(int number) =>
+        number == 1 ? VideoFileName : $"{Path.GetFileNameWithoutExtension(VideoFileName)}-{number}{Path.GetExtension(VideoFileName)}";
 
     /// <summary>Removes the recording folder when a recording failed before writing anything.</summary>
     public void DeleteFolderIfEmpty()
@@ -468,24 +507,28 @@ sealed class RecordingSession
     }
 
     /// <summary>
-    /// Gives every file in a recording folder its final name. Safe to call again, e.g. after the worker was killed
-    /// (a fragmented MP4 cut short is still playable; a half-written .m4a is dropped and its WAV kept).
+    /// Gives the files <paramref name="names"/> in a recording folder their final names; every file in it when null,
+    /// which must wait until nothing writes to the folder any more. Safe to call again, e.g. after the worker was
+    /// killed (a fragmented MP4 cut short is still playable; a half-written .m4a is dropped and its WAV kept).
     /// Returns an error message, or null.
     /// </summary>
-    public static string? FinalizeFiles(string folder)
+    public static string? FinalizeFiles(string folder, IEnumerable<string>? names = null)
     {
+        names ??= AudioFileNames.Concat(Directory.EnumerateFiles(folder, TempFileName("*" + Path.GetExtension(VideoFileName)))
+            .Select(path => Path.GetFileNameWithoutExtension(path)));
         var errors = new List<string>();
-        foreach (string name in FileNames)
+        foreach (string name in names.ToList())
         {
+            bool isAudio = AudioFileNames.Contains(name);
             string temp = Path.Combine(folder, TempFileName(name));
-            if (name != VideoFileName)
+            if (isAudio)
                 TryDelete(Path.Combine(folder, TempFileName(CompressedName(name))));
             if (!File.Exists(temp))
                 continue;
             try
             {
                 // The compressed copy is complete once it has its final name; only deleting the WAV was cut short.
-                if (name != VideoFileName && File.Exists(Path.Combine(folder, CompressedName(name))))
+                if (isAudio && File.Exists(Path.Combine(folder, CompressedName(name))))
                     File.Delete(temp);
                 else
                     File.Move(temp, Path.Combine(folder, name));
@@ -510,13 +553,33 @@ sealed class RecordingSession
         }
     }
 
-    private static string CreateFolder(string root, DateTime startedAt, string targetName)
+    /// <summary>Creates a new recording folder, <c>yyyy-MM-dd_HH-mm-ss-&lt;target name&gt;</c>, and returns its path.</summary>
+    public static string CreateFolder(string root, DateTime startedAt, string targetName)
     {
-        string baseName = $"{startedAt:yyyy-MM-dd_HH-mm-ss}-{SanitizeFileName(targetName)}";
+        string path = UniqueFolderPath(root, startedAt, targetName);
+        Directory.CreateDirectory(path);
+        return path;
+    }
+
+    /// <summary>Renames a recording folder after <paramref name="targetName"/> unless it already is, and returns its path.</summary>
+    public static string RenameFolder(string folder, DateTime startedAt, string targetName)
+    {
+        if (Path.GetFileName(folder).StartsWith(FolderName(startedAt, targetName), StringComparison.Ordinal))
+            return folder;
+        string path = UniqueFolderPath(Path.GetDirectoryName(folder)!, startedAt, targetName);
+        Directory.Move(folder, path);
+        return path;
+    }
+
+    private static string FolderName(DateTime startedAt, string targetName) =>
+        $"{startedAt:yyyy-MM-dd_HH-mm-ss}-{SanitizeFileName(targetName)}";
+
+    private static string UniqueFolderPath(string root, DateTime startedAt, string targetName)
+    {
+        string baseName = FolderName(startedAt, targetName);
         string path = Path.Combine(root, baseName);
         for (int i = 2; Directory.Exists(path); i++)
             path = Path.Combine(root, $"{baseName} ({i})");
-        Directory.CreateDirectory(path);
         return path;
     }
 

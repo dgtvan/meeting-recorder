@@ -36,7 +36,9 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
   tests use `--record --file <video> --name <n> --data-dir <scratch folder>` instead: it replays a video file through the same encoder settings
   and captures nothing from the screen. `bench/make-test-video.ps1` makes the test video and `bench/bench.ps1`
   measures a run; log results in docs/performance.md. Delete test recordings afterwards.
-- `MeetingRecorder.exe --teams-status` prints whether a Teams call is active and which window auto-record would use.
+- `MeetingRecorder.exe --teams-status` prints whether a Teams call is active and which windows auto-record would use,
+  then a `teams-window` block per visible Teams window (rect, topmost/owner/capture affinity, why it's skipped, and
+  its button names via UI Automation) to tell the meeting window from sharing toolbars.
   It captures nothing, and works from the agent account because it shares the user's desktop and audio devices.
 - Whether a deploy may run depends only on the app's state: if it isn't running, or is running but not recording,
   deploy. A Teams call doesn't block it (the new app may then start recording that call, which is fine).

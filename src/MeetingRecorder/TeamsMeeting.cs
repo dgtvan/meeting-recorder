@@ -20,6 +20,9 @@ static class TeamsMeeting
     private const string ProcessName = "ms-teams";
     private const string WindowClass = "TeamsWebView";
     private const string TitleSuffix = " | Microsoft Teams";
+    private const int MinWindowSize = 100;
+    private const int DWMWA_CLOAKED = 14;
+    private const uint WDA_NONE = 0;
 
     private static readonly HashSet<string> MainWindowSections = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -57,26 +60,57 @@ static class TeamsMeeting
 
     /// <summary>
     /// Every open meeting or call window, named after the meeting; empty when Teams shows none. A second call (one
-    /// on hold, or one being answered) has its own window.
+    /// on hold, or one being answered) has its own window. With <paramref name="onScreenOnly"/>, only those that show
+    /// something to record.
     /// </summary>
-    public static List<WindowInfo> FindMeetingWindows()
+    public static List<WindowInfo> FindMeetingWindows(bool onScreenOnly = true) =>
+        FindTeamsWindows()
+            .Where(hwnd => ClassName(hwnd) == WindowClass && (!onScreenOnly || NotShownReason(hwnd) == null))
+            .Select(hwnd => MeetingName(Title(hwnd)) is { } name ? new WindowInfo(hwnd, name) : null)
+            .OfType<WindowInfo>()
+            .ToList();
+
+    /// <summary>Every visible top-level window of Teams, in z-order.</summary>
+    internal static List<IntPtr> FindTeamsWindows()
     {
         var teamsProcessIds = Process.GetProcessesByName(ProcessName).Select(p =>
         {
             using (p)
                 return (uint)p.Id;
         }).ToHashSet();
-        var found = new List<WindowInfo>();
+        var found = new List<IntPtr>();
         EnumWindows((hwnd, _) =>
         {
             GetWindowThreadProcessId(hwnd, out uint processId);
-            if (teamsProcessIds.Contains(processId) && IsWindowVisible(hwnd) && ClassName(hwnd) == WindowClass
-                && MeetingName(Title(hwnd)) is { } name)
-                found.Add(new WindowInfo(hwnd, name));
+            if (teamsProcessIds.Contains(processId) && IsWindowVisible(hwnd))
+                found.Add(hwnd);
             return true;
         }, IntPtr.Zero);
         return found;
     }
+
+    /// <summary>
+    /// Why a window shows nothing to record, or null when it does: minimized, cloaked, excluded from screen capture
+    /// (Teams opens such windows with the meeting's title while you share), tiny, or off every display. Capturing one
+    /// fails, and restoring a minimized one would pop it up over what you share. It's found again once it shows.
+    /// </summary>
+    internal static string? NotShownReason(IntPtr hwnd)
+    {
+        if (IsIconic(hwnd))
+            return "minimized";
+        if (DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0)
+            return "cloaked";
+        if (GetWindowDisplayAffinity(hwnd, out uint affinity) && affinity != WDA_NONE)
+            return "excluded from capture";
+        if (Bounds(hwnd) is not { } bounds)
+            return "gone";
+        if (bounds.Width < MinWindowSize || bounds.Height < MinWindowSize)
+            return "tiny";
+        return Screen.AllScreens.Any(screen => screen.Bounds.IntersectsWith(bounds)) ? null : "off screen";
+    }
+
+    internal static Rectangle? Bounds(IntPtr hwnd) =>
+        GetWindowRect(hwnd, out RECT r) ? Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom) : null;
 
     /// <summary>"Daily standup | Microsoft Teams" gives "Daily standup"; main-window titles give null.</summary>
     internal static string? MeetingName(string title)
@@ -89,14 +123,14 @@ static class TeamsMeeting
         return name;
     }
 
-    private static string Title(IntPtr hwnd)
+    internal static string Title(IntPtr hwnd)
     {
         var buffer = new StringBuilder(512);
         GetWindowText(hwnd, buffer, buffer.Capacity);
         return buffer.ToString().Trim();
     }
 
-    private static string ClassName(IntPtr hwnd)
+    internal static string ClassName(IntPtr hwnd)
     {
         var buffer = new StringBuilder(256);
         GetClassName(hwnd, buffer, buffer.Capacity);
@@ -113,6 +147,24 @@ static class TeamsMeeting
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);

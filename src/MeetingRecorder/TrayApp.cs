@@ -25,16 +25,24 @@ sealed class TrayApp : ApplicationContext
     private const int TeamsCheckMilliseconds = 3000;
     private const int CallStartedChecks = 2;
     private const int CallEndedChecks = 4;
+    // A call whose meeting windows are all closed ends after two checks, long enough for Teams to replace the
+    // pre-join screen with the meeting window.
+    private const int NoWindowChecks = 2;
     private static readonly TimeSpan MinAutoRecording = TimeSpan.FromSeconds(30);
 
     private enum Phase { Starting, Recording, Saving }
 
     /// <summary>A recording started from the tray, from the moment it is launched until its worker exits.</summary>
-    private sealed class ActiveRecording(RecordingProcess process, RecordingTarget target, bool automatic)
+    private sealed class ActiveRecording(RecordingProcess process, RecordingTarget target, TeamsCall? call, string videoFile)
     {
         public RecordingProcess Process { get; } = process;
         public RecordingTarget Target { get; } = target;
-        public bool IsAuto { get; } = automatic;
+        /// <summary>The Teams call this was auto-recorded for; null for a recording started by hand.</summary>
+        public TeamsCall? Call { get; } = call;
+        public bool IsAuto => Call != null;
+        /// <summary>The audio of a Teams call, recorded next to its window videos; not listed as a recording of its own.</summary>
+        public bool IsAudio => Target.IsAudioOnly;
+        public string VideoFile { get; } = videoFile;
         public Phase Phase { get; private set; } = Phase.Starting;
         public DateTime PhaseSince { get; private set; } = DateTime.UtcNow;
         public bool IsCapturing => Phase is Phase.Starting or Phase.Recording;
@@ -44,6 +52,22 @@ sealed class TrayApp : ApplicationContext
             Phase = phase;
             PhaseSince = DateTime.UtcNow;
         }
+    }
+
+    /// <summary>
+    /// An auto-recorded Teams call: one folder with a video per meeting window (video.mp4, video-2.mp4, ... in the
+    /// order they opened) and one set of audio files, recorded by a worker of its own for the whole call.
+    /// </summary>
+    private sealed class TeamsCall(string folder, DateTime startedAt)
+    {
+        public string Folder { get; } = folder;
+        public DateTime StartedAt { get; } = startedAt;
+        /// <summary>Set once the call ended or was stopped; its folder is tidied up when the last recording is saved.</summary>
+        public bool Ended { get; set; }
+        public ActiveRecording? Audio { get; set; }
+        /// <summary>Every window video started, including those already saved.</summary>
+        public List<ActiveRecording> Videos { get; } = [];
+        public string NextVideoFile => RecordingSession.NumberedVideoFileName(Videos.Count + 1);
     }
 
     private readonly AppSettings _settings;
@@ -63,8 +87,12 @@ sealed class TrayApp : ApplicationContext
     private readonly System.Windows.Forms.Timer _teamsTimer = new() { Interval = TeamsCheckMilliseconds };
     private int _callChecks;
     private int _noCallChecks;
+    private int _noWindowChecks;
     // Meeting windows auto-recorded during this call: one that was stopped by hand or failed waits for the next call.
     private readonly HashSet<IntPtr> _autoTried = [];
+    private TeamsCall? _call;
+    private readonly TeamsLog _teamsLog = new();
+    private bool _teamsCallSeen;
     private int _animationFrame;
     private readonly List<string> _problems = [];
     private readonly EventWaitHandle _exitRequest = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-Exit");
@@ -202,7 +230,10 @@ sealed class TrayApp : ApplicationContext
     private void RefreshIcon()
     {
         bool hasProblem = _problems.Count > 0;
-        int recording = _recordings.Count(r => r.Phase == Phase.Recording);
+        // A call's audio counts only while none of its windows is being recorded, e.g. between the pre-join screen
+        // and the meeting window.
+        int recording = Math.Max(_recordings.Count(r => r.Phase == Phase.Recording && !r.IsAudio),
+            _recordings.Any(r => r.Phase == Phase.Recording) ? 1 : 0);
         _tray.Icon = recording > 0 ? Frame(TrayIcons.Recording(recording, hasProblem))
             : _recordings.Any(r => r.Phase == Phase.Starting) ? TrayIcons.Starting
             : _recordings.Count > 0 ? Frame(TrayIcons.Processing)
@@ -234,15 +265,15 @@ sealed class TrayApp : ApplicationContext
     /// <summary>One recording: "Stop recording" stops it. Several: a submenu to stop each one, or all.</summary>
     private void BuildStopMenu()
     {
-        var capturing = _recordings.Where(r => r.IsCapturing).ToList();
-        _stopItem.Enabled = capturing.Count > 0;
+        _stopItem.Enabled = _recordings.Any(r => r.IsCapturing);
+        var capturing = _recordings.Where(r => r.IsCapturing && !r.IsAudio).ToList();
         _stopItem.DropDownItems.Clear();
         if (capturing.Count < 2)
             return;
         foreach (var recording in capturing)
         {
             _stopItem.DropDownItems.Add(new ToolStripMenuItem(Truncate(recording.Process.TargetName, MaxMenuTextLength), null,
-                (_, _) => StopRecording(recording)) { ToolTipText = recording.Process.TargetName });
+                (_, _) => StopByHand(recording)) { ToolTipText = recording.Process.TargetName });
         }
         _stopItem.DropDownItems.Add(new ToolStripSeparator());
         _stopItem.DropDownItems.Add(new ToolStripMenuItem("Stop all", null, (_, _) => StopAll()));
@@ -309,17 +340,27 @@ sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// Starts recording every meeting window once a Teams call has been seen for a few seconds (a call on hold keeps
-    /// its own window, so it is recorded too), and stops a recording it started as soon as its window closes, or once
-    /// no call has been seen for a few seconds.
+    /// Starts recording every meeting window into the call's folder once a Teams call has been seen for a few seconds
+    /// (a call on hold keeps its own window, so it is recorded too), and the call's audio with the first one. Stops a
+    /// window's video as soon as the window closes, and the whole call once no call has been seen for a few seconds.
     /// </summary>
     private void CheckTeams()
     {
         // Teams closes the meeting window the moment the call ends, so this is the quickest end signal. It also
         // replaces the window mid-call (the pre-join screen, which already holds the microphone, becomes the meeting
-        // window on Join); the new window is recorded below like any other.
-        foreach (var recording in _recordings.Where(r => r.IsAuto && r.IsCapturing && !WindowList.IsAlive(r.Target.WindowHandle)).ToList())
+        // window on Join); the new window is recorded below like any other, and the call's audio carries on.
+        foreach (var recording in _recordings.Where(r => r.IsAuto && !r.IsAudio && r.IsCapturing && !WindowList.IsAlive(r.Target.WindowHandle)).ToList())
             StopRecording(recording);
+        // With every meeting window gone for a moment the call is over, well before Teams lets go of the microphone.
+        if (_call != null && TeamsMeeting.FindMeetingWindows(onScreenOnly: false).Count == 0)
+        {
+            if (++_noWindowChecks >= NoWindowChecks)
+                EndCall("no meeting window open");
+        }
+        else
+        {
+            _noWindowChecks = 0;
+        }
 
         bool inCall;
         try
@@ -338,21 +379,73 @@ sealed class TrayApp : ApplicationContext
             if (++_noCallChecks < CallEndedChecks)
                 return;
             _autoTried.Clear();
-            foreach (var recording in _recordings.Where(r => r.IsAuto && r.IsCapturing).ToList())
-                StopRecording(recording);
+            EndCall("Teams released the microphone");
+            if (_teamsCallSeen)
+            {
+                _teamsCallSeen = false;
+                _teamsLog.Reset();
+                TeamsLog.Append("Teams call over: microphone released.");
+            }
             return;
         }
 
         _noCallChecks = 0;
+        if (!_teamsCallSeen)
+        {
+            _teamsCallSeen = true;
+            TeamsLog.Append("Teams call seen: Teams is using the microphone.");
+        }
+        _teamsLog.SnapshotIfChanged();
         if (++_callChecks < CallStartedChecks || _exitAfterStop)
             return;
         foreach (var window in TeamsMeeting.FindMeetingWindows())
         {
             if (!_autoTried.Add(window.Handle))
                 continue;
-            if (StartRecording(new RecordingTarget(window.Title, window.Handle, null), automatic: true))
-                ShowBalloon("Recording Teams meeting", $"{window.Title}\nStops by itself when the meeting ends.", ToolTipIcon.Info);
+            bool first = _call == null;
+            if (StartCallRecording(window))
+                ShowBalloon(first ? "Recording Teams meeting" : "Also recording another Teams window",
+                    $"{window.Title}\nStops by itself when the meeting ends.", ToolTipIcon.Info);
         }
+    }
+
+    /// <summary>Starts recording a meeting window into the current call's folder, starting the call first if needed.</summary>
+    private bool StartCallRecording(WindowInfo window)
+    {
+        var target = RecordingTarget.ForWindow(window);
+        if (IsBeingRecorded(target))
+            return false;
+        if (_call == null)
+        {
+            try
+            {
+                var startedAt = DateTime.Now;
+                _call = new TeamsCall(RecordingSession.CreateFolder(EnsureRoot(), startedAt, window.Title), startedAt);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                AddProblem($"Could not start recording: {ex.Message}");
+                return false;
+            }
+            TeamsLog.Append($"Call recording started in {_call.Folder}");
+            StartRecording(RecordingTarget.ForAudio($"Call audio: {window.Title}"), _call);
+        }
+        TeamsLog.Append($"Recording window {window.Handle} \"{window.Title}\" as {_call.NextVideoFile}");
+        return StartRecording(target, _call);
+    }
+
+    /// <summary>Stops every recording of the current Teams call; its folder is tidied up once the last one is saved.</summary>
+    private void EndCall(string reason)
+    {
+        if (_call is not { } call)
+            return;
+        TeamsLog.Append($"Call recording ending: {reason}.");
+        _call = null;
+        _noWindowChecks = 0;
+        call.Ended = true;
+        foreach (var recording in _recordings.Where(r => r.Call == call).ToList())
+            StopRecording(recording);
+        FinishCallIfSaved(call);
     }
 
     private void ToggleAutoTeams()
@@ -527,16 +620,17 @@ sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// Starts recording <paramref name="target"/> next to any recordings already running. Returns false when it
-    /// isn't started: the target is already being recorded, its window is gone, the app is exiting, or it failed.
+    /// Starts recording <paramref name="target"/> next to any recordings already running, into a folder of its own or,
+    /// for a Teams <paramref name="call"/>, into the call's folder. Returns false when it isn't started: the target is
+    /// already being recorded, its window is gone, the app is exiting, or it failed.
     /// </summary>
-    private bool StartRecording(RecordingTarget target, bool automatic = false)
+    private bool StartRecording(RecordingTarget target, TeamsCall? call = null)
     {
         if (_exitAfterStop || IsBeingRecorded(target))
             return false;
         if (target.WindowHandle != IntPtr.Zero && !WindowList.IsAlive(target.WindowHandle))
         {
-            if (!automatic)
+            if (call == null)
                 ShowBalloon("Window is gone", "That window was closed. Pick another one.", ToolTipIcon.Info);
             return false;
         }
@@ -544,8 +638,14 @@ sealed class TrayApp : ApplicationContext
         ActiveRecording? recording = null;
         try
         {
-            var process = new RecordingProcess(_ui, target);
-            var added = recording = new ActiveRecording(process, target, automatic);
+            string videoFile = call?.NextVideoFile ?? RecordingSession.VideoFileName;
+            var output = call == null ? new RecordingOutput() : new RecordingOutput(call.Folder, videoFile, AudioFiles: target.IsAudioOnly);
+            var process = new RecordingProcess(_ui, target, output);
+            var added = recording = new ActiveRecording(process, target, call, videoFile);
+            if (call != null && target.IsAudioOnly)
+                call.Audio = added;
+            else
+                call?.Videos.Add(added);
             process.Started += _ =>
             {
                 if (added.Phase != Phase.Starting)
@@ -573,7 +673,12 @@ sealed class TrayApp : ApplicationContext
         catch (Exception ex)
         {
             if (recording != null)
+            {
                 _recordings.Remove(recording);
+                call?.Videos.Remove(recording);
+                if (call?.Audio == recording)
+                    call.Audio = null;
+            }
             RefreshState();
             AddProblem($"Could not start recording: {ex.Message}");
             return false;
@@ -589,8 +694,17 @@ sealed class TrayApp : ApplicationContext
         recording.Process.Stop();
     }
 
+    /// <summary>Stops one recording from the menu; stopping the last window of a Teams call ends the call.</summary>
+    private void StopByHand(ActiveRecording recording)
+    {
+        StopRecording(recording);
+        if (recording.Call is { } call && call == _call && !_recordings.Any(r => r.Call == call && !r.IsAudio && r.IsCapturing))
+            EndCall("its last window was stopped by hand");
+    }
+
     private void StopAll()
     {
+        EndCall("stopped by hand");
         foreach (var recording in _recordings.Where(r => r.IsCapturing).ToList())
             StopRecording(recording);
     }
@@ -600,8 +714,10 @@ sealed class TrayApp : ApplicationContext
         RecordingProcess session = recording.Process;
         _recordings.Remove(recording);
         RefreshState();
-        if (recording.IsAuto && error == null && DropShortCall(session))
+        if (recording.Call is { } call)
         {
+            OnCallRecordingFinished(recording, call, error);
+            FinishCallIfSaved(call);
             ExitIfDone();
             return;
         }
@@ -626,26 +742,91 @@ sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// Deletes an auto-recorded Teams call shorter than <see cref="MinAutoRecording"/>, such as a pre-join screen or a
-    /// call that was left at once, and logs it. Returns false when the recording is kept.
+    /// Reports a failed recording of a Teams call. A window that failed before its first frame while another window of
+    /// the call is recorded is only logged: Teams opens windows with the meeting's title that can't be captured.
     /// </summary>
-    private bool DropShortCall(RecordingProcess session)
+    private void OnCallRecordingFinished(ActiveRecording recording, TeamsCall call, string? error)
     {
-        if (session.FolderPath is not { } folder || session.CapturedFor is not { } length || length >= MinAutoRecording)
-            return false;
+        string length = recording.Process.CapturedFor is { } captured ? $"{captured.TotalSeconds:0} s" : "never started";
+        TeamsLog.Append($"{(recording.IsAudio ? "Call audio" : recording.VideoFile)} ({recording.Target.Name}) ended: {length}"
+            + (error != null ? $", failed: {error}" : "."));
+        if (error == null)
+            return;
+        if (!recording.IsAudio && recording.Process.CapturedFor == null
+            && call.Videos.Any(v => v != recording && v.Process.CapturedFor != null))
+            WarningLog.Append($"Teams window not recorded ({recording.Target.Name}), the call's other windows are: {error}");
+        else
+            AddProblem($"Recording failed: {error}");
+    }
+
+    private void FinishCallIfSaved(TeamsCall call)
+    {
+        if (call.Ended && !_recordings.Any(r => r.Call == call))
+            FinishCall(call);
+    }
+
+    /// <summary>
+    /// Tidies up a Teams call's folder once every recording of it is saved. A call shorter than
+    /// <see cref="MinAutoRecording"/> (a pre-join screen, a call left at once) is deleted. Otherwise the videos of
+    /// windows open that briefly (the pre-join screen before the meeting window) are deleted, the rest are numbered in
+    /// order, and the folder is named after the window recorded longest. Deletions are logged without a warning.
+    /// </summary>
+    private void FinishCall(TeamsCall call)
+    {
+        string folder = call.Folder;
+        if (!Directory.Exists(folder))
+            return;
         string name = Path.GetFileName(folder);
+        // The workers rename their own files; this covers one that was killed or crashed first.
+        if (RecordingSession.FinalizeFiles(folder) is { } renameError)
+            AddProblem(renameError);
         try
         {
-            if (Directory.Exists(folder))
+            TimeSpan Length(ActiveRecording? r) => r?.Process.CapturedFor ?? TimeSpan.Zero;
+            TimeSpan callLength = call.Videos.Select(Length).Append(Length(call.Audio)).Max();
+            if (callLength < MinAutoRecording)
+            {
                 Directory.Delete(folder, recursive: true);
-            WarningLog.Append($"Dropped Teams recording {name}: {length.TotalSeconds:0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.");
-            return true;
+                WarningLog.Append($"Dropped Teams recording {name}: {callLength.TotalSeconds:0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.");
+                TeamsLog.Append($"Call recording dropped: {callLength.TotalSeconds:0} s.");
+                return;
+            }
+
+            var kept = new List<ActiveRecording>();
+            foreach (var video in call.Videos.Where(v => File.Exists(Path.Combine(folder, v.VideoFile))))
+            {
+                if (Length(video) >= MinAutoRecording)
+                {
+                    kept.Add(video);
+                    continue;
+                }
+                File.Delete(Path.Combine(folder, video.VideoFile));
+                string dropped = $"Dropped {video.VideoFile} ({video.Target.Name}) from Teams recording {name}: "
+                    + $"{Length(video).TotalSeconds:0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.";
+                WarningLog.Append(dropped);
+                TeamsLog.Append(dropped);
+            }
+            // Each file moves to the same or a lower number, which is free by then.
+            for (int i = 0; i < kept.Count; i++)
+            {
+                string numbered = RecordingSession.NumberedVideoFileName(i + 1);
+                if (numbered == kept[i].VideoFile)
+                    continue;
+                File.Move(Path.Combine(folder, kept[i].VideoFile), Path.Combine(folder, numbered));
+                TeamsLog.Append($"Renamed {kept[i].VideoFile} to {numbered}.");
+            }
+            if (kept.MaxBy(Length) is { } main)
+                folder = RecordingSession.RenameFolder(folder, call.StartedAt, main.Target.Name);
+            TeamsLog.Append($"Call recording saved in {folder}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            AddProblem($"Could not delete the short Teams recording {name}: {ex.Message}");
-            return false;
+            AddProblem($"Could not tidy up the Teams recording {name}: {ex.Message}");
         }
+
+        _lastFolder = folder;
+        if (!_exitAfterStop && _problems.Count == 0)
+            ShowBalloon("Recording saved", "Click to open " + Path.GetFileName(folder), ToolTipIcon.Info);
     }
 
     /// <summary>

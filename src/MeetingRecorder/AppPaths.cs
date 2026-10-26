@@ -16,6 +16,8 @@ static class AppPaths
 
     public static string WarningLogPath => Path.Combine(DataDir, "warnings.log");
 
+    public static string TeamsLogPath => Path.Combine(DataDir, "teams.log");
+
     /// <summary>Sets <see cref="DataDir"/> from the command line. Returns false when the argument is missing or empty.</summary>
     public static bool TryInitialize(string[] args)
     {

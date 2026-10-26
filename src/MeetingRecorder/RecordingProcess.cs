@@ -40,13 +40,13 @@ sealed class RecordingProcess
     /// <summary>Raised once the worker has exited. The argument is an error message, or null on success.</summary>
     public event Action<RecordingProcess, string?>? Finished;
 
-    public RecordingProcess(SynchronizationContext ui, RecordingTarget target)
+    public RecordingProcess(SynchronizationContext ui, RecordingTarget target, RecordingOutput output)
     {
         _ui = ui;
         TargetName = target.Name;
         _process = new Process
         {
-            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, RecorderWorker.BuildArguments(target, s_skipGraphicsCapture))
+            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, RecorderWorker.BuildArguments(target, output, s_skipGraphicsCapture))
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,

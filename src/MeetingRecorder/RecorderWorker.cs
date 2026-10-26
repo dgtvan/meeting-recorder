@@ -24,6 +24,8 @@ static class RecorderWorker
         }
 
         RecordingTarget target;
+        var output = new RecordingOutput(Value(args, "--folder"), Value(args, "--video-file") ?? RecordingSession.VideoFileName,
+            AudioFiles: !args.Contains("--no-audio-files"));
         try
         {
             target = ParseTarget(args);
@@ -47,7 +49,7 @@ static class RecorderWorker
         RecordingSession session;
         try
         {
-            session = RecordingSession.Create(ui, AppSettings.Load(), target);
+            session = RecordingSession.Create(ui, AppSettings.Load(), target, output);
         }
         catch (Exception ex)
         {
@@ -114,31 +116,39 @@ static class RecorderWorker
     }
 
     /// <summary>Builds the worker command line for a target.</summary>
-    public static string BuildArguments(RecordingTarget target, bool skipGraphicsCapture)
+    public static string BuildArguments(RecordingTarget target, RecordingOutput output, bool skipGraphicsCapture)
     {
-        string args = target.WindowHandle != IntPtr.Zero
-            ? $"{Flag} --window {target.WindowHandle.ToInt64()}"
+        string args = target.IsAudioOnly ? $"{Flag} --audio-only"
+            : target.WindowHandle != IntPtr.Zero ? $"{Flag} --window {target.WindowHandle.ToInt64()}"
             : $"{Flag} --display \"{target.DisplayDeviceName}\"";
         args += $" --name \"{target.Name.Replace("\"", "'")}\" {AppPaths.Argument}";
+        if (output.Folder != null)
+            args += $" --folder \"{output.Folder}\"";
+        if (output.VideoFileName != RecordingSession.VideoFileName)
+            args += $" --video-file \"{output.VideoFileName}\"";
+        if (!output.AudioFiles)
+            args += " --no-audio-files";
         return skipGraphicsCapture ? args + " --crop" : args;
     }
 
     private static RecordingTarget ParseTarget(string[] args)
     {
-        string? Value(string name)
-        {
-            int i = Array.IndexOf(args, name);
-            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
-        }
-
-        string name = Value("--name") ?? throw new ArgumentException("--name is required");
-        if (Value("--file") is { } file)
+        string name = Value(args, "--name") ?? throw new ArgumentException("--name is required");
+        if (args.Contains("--audio-only"))
+            return RecordingTarget.ForAudio(name);
+        if (Value(args, "--file") is { } file)
             return new RecordingTarget(name, IntPtr.Zero, null, Path.GetFullPath(file));
-        if (Value("--window") is { } hwnd)
+        if (Value(args, "--window") is { } hwnd)
             return new RecordingTarget(name, new IntPtr(long.Parse(hwnd)), null);
-        if (Value("--display") is { } display)
+        if (Value(args, "--display") is { } display)
             return new RecordingTarget(name, IntPtr.Zero, display);
-        throw new ArgumentException("--window, --display or --file is required");
+        throw new ArgumentException("--window, --display, --file or --audio-only is required");
+    }
+
+    private static string? Value(string[] args, string name)
+    {
+        int i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
     }
 
     private static void Send(string kind, string? text = null)

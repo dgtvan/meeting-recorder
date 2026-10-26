@@ -22,6 +22,7 @@ static class Program
                 Console.Out.WriteLine("window none");
             foreach (var window in windows)
                 Console.Out.WriteLine($"window {window.Handle} {window.Title}");
+            TeamsWindowReport.Print(Console.Out);
             return 0;
         }
 
