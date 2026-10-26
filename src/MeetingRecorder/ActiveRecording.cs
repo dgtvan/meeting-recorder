@@ -1,0 +1,43 @@
+namespace MeetingRecorder;
+
+enum RecordingPhase { Starting, Recording, Saving }
+
+/// <summary>A recording started from the tray, from the moment it is launched until its worker exits.</summary>
+sealed class ActiveRecording(RecordingProcess process, RecordingTarget target, MeetingCall? call, string videoFile)
+{
+    public RecordingProcess Process { get; } = process;
+    public RecordingTarget Target { get; } = target;
+    /// <summary>The call this was auto-recorded for; null for a recording started by hand.</summary>
+    public MeetingCall? Call { get; } = call;
+    public bool IsAuto => Call != null;
+    /// <summary>The audio of a call, recorded next to its window videos; not listed as a recording of its own.</summary>
+    public bool IsAudio => Target.IsAudioOnly;
+    public string VideoFile { get; } = videoFile;
+    public RecordingPhase Phase { get; private set; } = RecordingPhase.Starting;
+    public DateTime PhaseSince { get; private set; } = DateTime.UtcNow;
+    public bool IsCapturing => Phase is RecordingPhase.Starting or RecordingPhase.Recording;
+
+    public void Enter(RecordingPhase phase)
+    {
+        Phase = phase;
+        PhaseSince = DateTime.UtcNow;
+    }
+}
+
+/// <summary>
+/// An auto-recorded call: one folder with a video per meeting window (video.mp4, video-2.mp4, ... in the order they
+/// opened) and one set of audio files, recorded by a worker of its own for the whole call.
+/// </summary>
+sealed class MeetingCall(AutoRecorder recorder, string folder, DateTime startedAt)
+{
+    /// <summary>The auto-recorder of the meeting app the call is in.</summary>
+    public AutoRecorder Recorder { get; } = recorder;
+    public string Folder { get; } = folder;
+    public DateTime StartedAt { get; } = startedAt;
+    /// <summary>Set once the call ended or was stopped; its folder is tidied up when the last recording is saved.</summary>
+    public bool Ended { get; set; }
+    public ActiveRecording? Audio { get; set; }
+    /// <summary>Every window video started, including those already saved.</summary>
+    public List<ActiveRecording> Videos { get; } = [];
+    public string NextVideoFile => RecordingSession.NumberedVideoFileName(Videos.Count + 1);
+}

@@ -6,7 +6,7 @@ namespace MeetingRecorder;
 /// </summary>
 static class AppInitializer
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     /// <summary>
     /// Creates the data folder and, when it is new, copies the data from the locations used before standard v2.0.
@@ -42,7 +42,11 @@ static class AppInitializer
 
         if (settingsLoadError == null && (!File.Exists(AppPaths.SettingsPath) || settings.SchemaVersion < CurrentSchemaVersion))
         {
-            // Version 0 -> 1 only introduced SchemaVersion itself; later layout changes add their steps here.
+            // Version 0 -> 1 only introduced SchemaVersion itself.
+            // Version 1 -> 2: AutoRecordTeams became AutoRecord["teams"], one switch per meeting app.
+            if (settings.AutoRecordTeams is { } teams)
+                settings.AutoRecord.TryAdd("teams", teams);
+            settings.AutoRecordTeams = null;
             settings.SchemaVersion = CurrentSchemaVersion;
             TryRun(problems, "Could not write the default settings", settings.Save);
         }

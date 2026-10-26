@@ -3,29 +3,31 @@ using System.Diagnostics;
 namespace MeetingRecorder;
 
 /// <summary>
-/// teams.log in the data folder: what auto-record did during each Teams call, plus a <c>--teams-status</c> snapshot
-/// of every Teams window whenever they change, so which window is which (meeting, sharing toolbar, ...) can be worked
-/// out after the call.
+/// One meeting app's entries in meetings.log in the data folder: what auto-record did during each call, plus a
+/// <c>--meeting-status</c> snapshot of every window of the app whenever they change, so which window is which
+/// (meeting, sharing toolbar, ...) can be worked out after the call. Each entry starts with the app's name.
 /// </summary>
 /// <remarks>
 /// Snapshots run in a child process: reading button names loads UI Automation, which the tray shouldn't keep in
 /// memory, and can take seconds on a busy window.
 /// </remarks>
-sealed class TeamsLog
+sealed class MeetingLog(IMeetingApp app)
 {
+    public const string StatusFlag = "--meeting-status";
+
     private string? _lastSignature;
     private Process? _snapshot;
     private bool _snapshotPending;
 
-    public static void Append(string text) => LogFile.Append(AppPaths.TeamsLogPath, text);
+    public void Append(string text) => LogFile.Append(AppPaths.MeetingLogPath, $"[{app.DisplayName}] {text}");
 
-    /// <summary>Takes a snapshot when the Teams windows changed since the last one. Call on the UI thread.</summary>
+    /// <summary>Takes a snapshot when the app's windows changed since the last one. Call on the UI thread.</summary>
     public void SnapshotIfChanged()
     {
         string signature;
         try
         {
-            signature = TeamsWindowReport.Signature();
+            signature = MeetingWindowReport.Signature(app);
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
@@ -50,7 +52,7 @@ sealed class TeamsLog
         var ui = SynchronizationContext.Current!;
         var process = new Process
         {
-            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, "--teams-status")
+            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, $"{StatusFlag} {app.Id}")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -64,7 +66,7 @@ sealed class TeamsLog
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            Append($"Teams window snapshot failed: {ex.Message}");
+            Append($"Window snapshot failed: {ex.Message}");
             process.Dispose();
             return;
         }
@@ -81,7 +83,7 @@ sealed class TeamsLog
     {
         process.Dispose();
         _snapshot = null;
-        LogFile.Append(AppPaths.TeamsLogPath, "Teams windows:\n" + output, multiline: true);
+        LogFile.Append(AppPaths.MeetingLogPath, $"[{app.DisplayName}] Windows:\n{output}", multiline: true);
         if (_snapshotPending)
         {
             _snapshotPending = false;

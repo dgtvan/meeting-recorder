@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MeetingRecorder;
 
@@ -47,8 +48,17 @@ sealed class AppSettings
     /// <summary>Use the GPU's H.264 encoder when available; falls back to software encoding otherwise.</summary>
     public bool UseHardwareEncoder { get; set; } = true;
 
-    /// <summary>Start recording the meeting window when a Teams call or meeting starts, and stop when it ends.</summary>
-    public bool AutoRecordTeams { get; set; } = true;
+    /// <summary>
+    /// Auto-record turned on or off per meeting app, by <see cref="IMeetingApp.Id"/>; an app not listed is on.
+    /// Auto-record records a call's windows and audio when the call starts and stops when it ends.
+    /// </summary>
+    public Dictionary<string, bool> AutoRecord { get; set; } = [];
+
+    /// <summary>Schema 1's Teams-only switch; <see cref="AppInitializer"/> moves it to <see cref="AutoRecord"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AutoRecordTeams { get; set; }
+
+    public bool IsAutoRecordOn(IMeetingApp app) => !AutoRecord.TryGetValue(app.Id, out bool on) || on;
 
     public static AppSettings Load() => Load(out _);
 

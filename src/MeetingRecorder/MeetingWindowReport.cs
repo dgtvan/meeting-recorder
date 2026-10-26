@@ -4,12 +4,12 @@ using System.Windows.Automation;
 namespace MeetingRecorder;
 
 /// <summary>
-/// Diagnostic for <c>--teams-status</c>: describes every visible Teams window, to learn which one is the meeting,
-/// the sharing toolbar, and so on. Its meeting windows all share one title, so it reports what tells them apart:
-/// size and position, window styles, whether Teams hides it from capture, and the buttons it shows (read through
-/// UI Automation, the accessibility interface screen readers use). Captures nothing.
+/// Diagnostic for <c>--meeting-status</c>: describes every visible window of a meeting app, to learn which one is the
+/// meeting, the sharing toolbar, and so on. Teams' meeting windows all share one title, so it reports what tells them
+/// apart: size and position, window styles, whether the app hides it from capture, and the buttons it shows (read
+/// through UI Automation, the accessibility interface screen readers use). Captures nothing.
 /// </summary>
-static class TeamsWindowReport
+static class MeetingWindowReport
 {
     private const int GWL_EXSTYLE = -20;
     private const long WS_EX_TOPMOST = 0x00000008;
@@ -19,22 +19,32 @@ static class TeamsWindowReport
     private static readonly TimeSpan ButtonTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// A cheap summary of the Teams windows (no UI Automation) that changes when a window opens or closes, changes
+    /// A cheap summary of the app's windows (no UI Automation) that changes when a window opens or closes, changes
     /// title, size, or whether it's shown or on top, but not when it only moves.
     /// </summary>
-    public static string Signature() => string.Join("\n", TeamsMeeting.FindTeamsWindows().Select(hwnd =>
+    public static string Signature(IMeetingApp app) => string.Join("\n", app.FindAppWindows().Select(hwnd =>
     {
-        var size = TeamsMeeting.Bounds(hwnd)?.Size;
+        var size = MeetingWindows.Bounds(hwnd)?.Size;
         bool topmost = (GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64() & WS_EX_TOPMOST) != 0;
-        return $"{hwnd} {TeamsMeeting.Title(hwnd)} {size} {TeamsMeeting.NotShownReason(hwnd)} {topmost}";
+        return $"{hwnd} {MeetingWindows.Title(hwnd)} {size} {MeetingWindows.NotShownReason(hwnd)} {topmost}";
     }));
 
-    public static void Print(TextWriter output)
+    /// <summary>Prints whether the app is in a call, the windows auto-record would use, and every window of the app.</summary>
+    public static void Print(IMeetingApp app, TextWriter output)
     {
-        foreach (IntPtr hwnd in TeamsMeeting.FindTeamsWindows())
+        output.WriteLine($"app {app.Id} {app.DisplayName}");
+        output.WriteLine(app.IsCallActive() ? "call active" : "call none");
+        var meetings = app.FindMeetingWindows(onScreenOnly: false).ToDictionary(w => w.Handle, w => w.Title);
+        var recordable = app.FindMeetingWindows();
+        if (recordable.Count == 0)
+            output.WriteLine("window none");
+        foreach (var window in recordable)
+            output.WriteLine($"window {window.Handle} {window.Title}");
+
+        foreach (IntPtr hwnd in app.FindAppWindows())
         {
-            string title = TeamsMeeting.Title(hwnd);
-            var bounds = TeamsMeeting.Bounds(hwnd);
+            string title = MeetingWindows.Title(hwnd);
+            var bounds = MeetingWindows.Bounds(hwnd);
             long exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
             IntPtr owner = GetWindow(hwnd, GW_OWNER);
             GetWindowDisplayAffinity(hwnd, out uint affinity);
@@ -48,9 +58,9 @@ static class TeamsWindowReport
             if (affinity != 0)
                 flags.Add($"affinity=0x{affinity:X}");
 
-            output.WriteLine($"teams-window {hwnd} class={TeamsMeeting.ClassName(hwnd)} title=\"{title}\"");
-            output.WriteLine($"  meeting={(TeamsMeeting.MeetingName(title) is { } name ? $"\"{name}\"" : "no")}"
-                + $" shown={TeamsMeeting.NotShownReason(hwnd) ?? "yes"}"
+            output.WriteLine($"app-window {hwnd} class={MeetingWindows.ClassName(hwnd)} title=\"{title}\"");
+            output.WriteLine($"  meeting={(meetings.TryGetValue(hwnd, out string? name) ? $"\"{name}\"" : "no")}"
+                + $" shown={MeetingWindows.NotShownReason(hwnd) ?? "yes"}"
                 + $" rect={(bounds is { } b ? $"{b.X},{b.Y} {b.Width}x{b.Height}" : "none")}"
                 + (flags.Count > 0 ? " " + string.Join(' ', flags) : ""));
             output.WriteLine($"  buttons: {Buttons(hwnd)}");

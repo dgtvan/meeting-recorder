@@ -36,9 +36,9 @@ function Write-Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
 
 # Standard section 3.5: ask the app to close, and let it refuse while it is busy.
 function Stop-App {
-    # This account's processes only; --teams-status is a short diagnostic run.
+    # This account's processes only; --meeting-status is a short diagnostic run.
     $own = @(Get-CimInstance Win32_Process -Filter "Name = '$ExeName'" | Where-Object {
-        $_.CommandLine -notmatch '--teams-status' -and
+        $_.CommandLine -notmatch '--meeting-status' -and
             (Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User -eq $env:USERNAME
     })
     if ($own.Count -eq 0) { return }

@@ -6,39 +6,27 @@ using NAudio.CoreAudioApi.Interfaces;
 
 namespace MeetingRecorder;
 
-/// <summary>
-/// Detects a Microsoft Teams (new Teams, <c>ms-teams.exe</c>) call or meeting in progress and finds its window.
-/// </summary>
-/// <remarks>
-/// A call is in progress while Teams holds an active microphone capture session: Teams opens one only while in a
-/// call (muting keeps it open) and closes it when the call ends. The meeting window is the separate Teams window
-/// titled "&lt;meeting&gt; | Microsoft Teams"; the main window's title starts with the section shown, e.g.
-/// "Chat | &lt;chat name&gt; | Microsoft Teams".
-/// </remarks>
-static class TeamsMeeting
+/// <summary>Window and audio helpers for detecting a meeting app's calls (<see cref="IMeetingApp"/>).</summary>
+static class MeetingWindows
 {
-    private const string ProcessName = "ms-teams";
-    private const string WindowClass = "TeamsWebView";
-    private const string TitleSuffix = " | Microsoft Teams";
     private const int MinWindowSize = 100;
     private const int DWMWA_CLOAKED = 14;
     private const uint WDA_NONE = 0;
 
-    private static readonly HashSet<string> MainWindowSections = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>The ids of every running process with this name (no ".exe").</summary>
+    public static HashSet<uint> ProcessIds(string processName) => Process.GetProcessesByName(processName).Select(p =>
     {
-        "Activity", "Chat", "Teams", "Calendar", "Calls", "OneDrive", "Files", "Apps", "Copilot", "Communities",
-        "Assignments", "Approvals", "Shifts", "Planner", "Settings", "Help", "Search", "Microsoft Teams",
-    };
+        using (p)
+            return (uint)p.Id;
+    }).ToHashSet();
 
-    /// <summary>True while Teams is capturing from any microphone, i.e. a call or meeting is in progress.</summary>
-    public static bool IsCallActive()
+    /// <summary>
+    /// True while one of the processes holds an active microphone capture session. Meeting apps open one only while
+    /// in a call (muting keeps it open) and close it when the call ends.
+    /// </summary>
+    public static bool IsCapturingMicrophone(HashSet<uint> processIds)
     {
-        var teamsProcessIds = Process.GetProcessesByName(ProcessName).Select(p =>
-        {
-            using (p)
-                return (uint)p.Id;
-        }).ToHashSet();
-        if (teamsProcessIds.Count == 0)
+        if (processIds.Count == 0)
             return false;
 
         using var enumerator = new MMDeviceEnumerator();
@@ -50,7 +38,7 @@ static class TeamsMeeting
                 for (int i = 0; i < sessions.Count; i++)
                 {
                     using var session = sessions[i];
-                    if (session.State == AudioSessionState.AudioSessionStateActive && teamsProcessIds.Contains(session.GetProcessID))
+                    if (session.State == AudioSessionState.AudioSessionStateActive && processIds.Contains(session.GetProcessID))
                         return true;
                 }
             }
@@ -58,31 +46,16 @@ static class TeamsMeeting
         return false;
     }
 
-    /// <summary>
-    /// Every open meeting or call window, named after the meeting; empty when Teams shows none. A second call (one
-    /// on hold, or one being answered) has its own window. With <paramref name="onScreenOnly"/>, only those that show
-    /// something to record.
-    /// </summary>
-    public static List<WindowInfo> FindMeetingWindows(bool onScreenOnly = true) =>
-        FindTeamsWindows()
-            .Where(hwnd => ClassName(hwnd) == WindowClass && (!onScreenOnly || NotShownReason(hwnd) == null))
-            .Select(hwnd => MeetingName(Title(hwnd)) is { } name ? new WindowInfo(hwnd, name) : null)
-            .OfType<WindowInfo>()
-            .ToList();
-
-    /// <summary>Every visible top-level window of Teams, in z-order.</summary>
-    internal static List<IntPtr> FindTeamsWindows()
+    /// <summary>Every visible top-level window of the processes, in z-order.</summary>
+    public static List<IntPtr> VisibleWindows(HashSet<uint> processIds)
     {
-        var teamsProcessIds = Process.GetProcessesByName(ProcessName).Select(p =>
-        {
-            using (p)
-                return (uint)p.Id;
-        }).ToHashSet();
         var found = new List<IntPtr>();
+        if (processIds.Count == 0)
+            return found;
         EnumWindows((hwnd, _) =>
         {
             GetWindowThreadProcessId(hwnd, out uint processId);
-            if (teamsProcessIds.Contains(processId) && IsWindowVisible(hwnd))
+            if (processIds.Contains(processId) && IsWindowVisible(hwnd))
                 found.Add(hwnd);
             return true;
         }, IntPtr.Zero);
@@ -94,7 +67,7 @@ static class TeamsMeeting
     /// (Teams opens such windows with the meeting's title while you share), tiny, or off every display. Capturing one
     /// fails, and restoring a minimized one would pop it up over what you share. It's found again once it shows.
     /// </summary>
-    internal static string? NotShownReason(IntPtr hwnd)
+    public static string? NotShownReason(IntPtr hwnd)
     {
         if (IsIconic(hwnd))
             return "minimized";
@@ -109,28 +82,17 @@ static class TeamsMeeting
         return Screen.AllScreens.Any(screen => screen.Bounds.IntersectsWith(bounds)) ? null : "off screen";
     }
 
-    internal static Rectangle? Bounds(IntPtr hwnd) =>
+    public static Rectangle? Bounds(IntPtr hwnd) =>
         GetWindowRect(hwnd, out RECT r) ? Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom) : null;
 
-    /// <summary>"Daily standup | Microsoft Teams" gives "Daily standup"; main-window titles give null.</summary>
-    internal static string? MeetingName(string title)
-    {
-        if (!title.EndsWith(TitleSuffix, StringComparison.Ordinal))
-            return null;
-        string name = title[..^TitleSuffix.Length].Trim();
-        if (name.Length == 0 || name.Contains(" | ") || MainWindowSections.Contains(name))
-            return null;
-        return name;
-    }
-
-    internal static string Title(IntPtr hwnd)
+    public static string Title(IntPtr hwnd)
     {
         var buffer = new StringBuilder(512);
         GetWindowText(hwnd, buffer, buffer.Capacity);
         return buffer.ToString().Trim();
     }
 
-    internal static string ClassName(IntPtr hwnd)
+    public static string ClassName(IntPtr hwnd)
     {
         var buffer = new StringBuilder(256);
         GetClassName(hwnd, buffer, buffer.Capacity);

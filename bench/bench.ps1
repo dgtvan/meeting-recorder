@@ -27,8 +27,8 @@ $dataDir = Join-Path $env:TEMP "MeetingRecorder-bench-$([guid]::NewGuid().ToStri
 $settingsPath = Join-Path $dataDir 'settings.json'
 New-Item -ItemType Directory -Force $dataDir | Out-Null
 $settings = [ordered]@{
-    SchemaVersion = 1; MaxVideoHeight = $MaxHeight; CompressAudio = [bool]::Parse($Compress); VideoQuality = $Quality
-    SystemAudioDeviceId = $SystemAudio; MicrophoneDeviceId = $Microphone; AutoRecordTeams = $false
+    SchemaVersion = 2; MaxVideoHeight = $MaxHeight; CompressAudio = [bool]::Parse($Compress); VideoQuality = $Quality
+    SystemAudioDeviceId = $SystemAudio; MicrophoneDeviceId = $Microphone; AutoRecord = @{ teams = $false }
 }
 Set-Content -Path $settingsPath -Value ($settings | ConvertTo-Json)
 

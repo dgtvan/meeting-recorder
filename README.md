@@ -13,11 +13,11 @@ and microphone saved to **separate** audio files.
   again. All recordings capture the same system audio and microphone.
 - **Stop recording**: from the menu (with several running, a submenu stops one of them or *Stop all*), or
   double-click the tray icon to stop them all.
-- **Auto-record Teams meetings** (on by default): see [below](#teams-meetings).
+- **Auto-record meetings** (on by default for each supported app, so far Microsoft Teams): see [below](#auto-recording-meetings).
 - **Recordings**: the 10 most recent recordings, each with *Open folder* and its files (the one being recorded
   is listed but can't be opened until it is saved); plus *Open recordings folder*.
 - **System audio** / **Microphone**: choose the device, follow the Windows default, or turn the source off.
-- Every recording gets its own folder (an automatic Teams recording has [one per call](#teams-meetings)):
+- Every recording gets its own folder (an auto-recorded call has [one per call](#auto-recording-meetings)):
   `yyyy-MM-dd_HH-mm-ss-<window title|fullscreen>`, containing
 
   | File | Content |
@@ -75,22 +75,25 @@ Measurements and the reasoning behind the defaults: [docs/performance.md](docs/p
   0.7 MB/min microphone (WAV: 11 and 5.5 MB/min).
 - `video.mp4` is a fragmented MP4, so it stays playable even if the PC crashes mid-recording.
 
-## Teams meetings
+## Auto-recording meetings
 
-With *Auto-record Teams meetings* ticked, the app records a Microsoft Teams (new Teams) call or meeting by itself
-when it starts, and stops when it ends. A notification says when it starts. One call is one folder, named after the
-meeting, with a video of every meeting window Teams shows during the call and one set of audio files:
+*Auto-record meetings* in the tray menu lists the supported meeting apps; with an app ticked (all are by default),
+the app records a call or meeting in it by itself when it starts, and stops when it ends. A notification says when
+it starts. One call is one folder, named after the meeting, with a video of every meeting window the app shows
+during the call and one set of audio files:
 
 | File | Content |
 |---|---|
 | `video.mp4`, `video-2.mp4`, ... | One per meeting window, in the order they opened (e.g. the meeting and a second window Teams opens while you share, or a call on hold); each has the call's sound mixed in |
 | `audio-system.m4a`, `audio-mic.m4a` | The whole call, recorded once, from the first window's start until the call ends |
 
-- **Start:** Teams has been using a microphone for about 5 s (it does so only during a call, even while muted) and
-  a meeting window is open (the separate window titled "*meeting name* | Microsoft Teams"). A meeting window that
-  opens later during the call is recorded into the same folder.
+Supported apps: **Microsoft Teams** (new Teams).
+
+- **Start:** the app has been using a microphone for about 5 s (meeting apps do so only during a call, even while
+  muted) and a meeting window is open (for Teams, the separate window titled "*meeting name* | Microsoft Teams"). A
+  meeting window that opens later during the call is recorded into the same folder.
 - **Stop:** a window's video stops within about 3 s of the window closing. The call stops once no meeting window
-  has been open for about 3–6 s (Teams closes them as the call ends), or about 12 s after Teams stops using the
+  has been open for about 3–6 s (the app closes them as the call ends), or about 12 s after the app stops using the
   microphone.
 - If Teams replaces the meeting window during the call (the pre-join screen becomes the meeting window when you
   join), the new window gets the next video and the audio carries on.
@@ -105,12 +108,21 @@ meeting, with a video of every meeting window Teams shows during the call and on
   its own, and if it is of a meeting window, no automatic one starts for it.
 - While you share your screen, Teams minimizes the meeting window, so its video shows the last frame
   until it's restored. The audio is recorded throughout.
-- `teams.log` in the data folder records what auto-record did in each call (windows recorded, how long, files
-  dropped or renamed) and, whenever Teams' windows change during a call, a `--teams-status` description of each one
-  (size, position, styles, button names), for working out which window is which. It holds window titles and button
-  labels, which can include participants' names; it rolls over to `teams.old.log` at 1 MB.
-- Make sure everyone in the meeting knows it's being recorded: unlike Teams' own recording, this app doesn't tell
-  the other participants.
+- `meetings.log` in the data folder records what auto-record did in each call (windows recorded, how long, files
+  dropped or renamed) and, whenever the app's windows change during a call, a `--meeting-status` description of each
+  one (size, position, styles, button names), for working out which window is which. Each entry starts with the
+  app's name. It holds window titles and button labels, which can include participants' names; it rolls over to
+  `meetings.old.log` at 1 MB. `MeetingRecorder.exe --meeting-status [app]` prints the same on demand (app: `teams`).
+- Make sure everyone in the meeting knows it's being recorded: unlike a meeting app's own recording, this app
+  doesn't tell the other participants.
+
+### Supporting another meeting app
+
+Implement `IMeetingApp` (`src/MeetingRecorder/IMeetingApp.cs`): a stable `Id`, a `DisplayName`, how to tell the
+app is in a call (`IsCallActive`, usually `MeetingWindows.IsCapturingMicrophone` on its processes) and which windows
+show the meeting (`FindMeetingWindows`), plus `FindAppWindows` for the log. Add it to `MeetingApps.All`. The tray
+menu, the `AutoRecord` setting, recording, the per-call folder, `meetings.log` and `--meeting-status` all follow
+from that list. `TeamsMeetingApp` is the example.
 
 ## Window recording
 
@@ -137,7 +149,7 @@ left in place.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `SchemaVersion` | `1` | Managed by the app; older files are migrated at startup |
+| `SchemaVersion` | `2` | Managed by the app; older files are migrated at startup |
 | `RecordingsRoot` | `Videos\Meeting Recordings` | Where recording folders are created |
 | `SystemAudioDeviceId` / `MicrophoneDeviceId` | `""` | `""` = Windows default, `"off"` = don't record, else a device id (set via the menu) |
 | `VideoFramerate` | `15` | Maximum frames per second |
@@ -146,7 +158,7 @@ left in place.
 | `CompressAudio` | `true` | Convert the audio to AAC (.m4a) after stopping; `false` keeps WAV |
 | `CaptureMouseCursor` | `true` | |
 | `UseHardwareEncoder` | `true` | GPU encoding; uses far less CPU and memory than software |
-| `AutoRecordTeams` | `true` | Record Teams calls and meetings automatically (also in the tray menu) |
+| `AutoRecord` | `{}` | Auto-record per meeting app id, e.g. `{"teams": false}`; an app not listed is on (also in the tray menu, *Auto-record meetings*). Replaces schema 1's `AutoRecordTeams`, migrated at startup |
 
 ## Requirements
 

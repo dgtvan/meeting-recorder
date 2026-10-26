@@ -13,16 +13,22 @@ static class Program
             ApplicationConfiguration.Initialize();
             return RecorderWorker.Run(args);
         }
-        if (args.Length > 0 && args[0] == "--teams-status")
+        if (args.Length > 0 && args[0] == MeetingLog.StatusFlag)
         {
-            // Diagnostic: what Teams auto-record would see right now. Captures nothing and needs no data folder.
-            Console.Out.WriteLine(TeamsMeeting.IsCallActive() ? "call active" : "call none");
-            var windows = TeamsMeeting.FindMeetingWindows();
-            if (windows.Count == 0)
-                Console.Out.WriteLine("window none");
-            foreach (var window in windows)
-                Console.Out.WriteLine($"window {window.Handle} {window.Title}");
-            TeamsWindowReport.Print(Console.Out);
+            // Diagnostic: what auto-record sees right now, for one meeting app (by id) or all. Captures nothing and
+            // needs no data folder.
+            var apps = MeetingApps.All.ToList();
+            if (args.Length > 1)
+            {
+                if (MeetingApps.Find(args[1]) is not { } only)
+                {
+                    Console.Out.WriteLine($"unknown app {args[1]}; known: {string.Join(", ", apps.Select(a => a.Id))}");
+                    return 2;
+                }
+                apps = [only];
+            }
+            foreach (var app in apps)
+                MeetingWindowReport.Print(app, Console.Out);
             return 0;
         }
 

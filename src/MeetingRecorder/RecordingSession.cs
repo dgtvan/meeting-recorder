@@ -11,7 +11,7 @@ namespace MeetingRecorder;
 /// </summary>
 sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayDeviceName, string? SourceFile = null)
 {
-    /// <summary>Records no video, only the separate audio files: the audio of a Teams call, which has a video per window.</summary>
+    /// <summary>Records no video, only the separate audio files: the audio of an auto-recorded call, which has a video per window.</summary>
     public bool IsAudioOnly { get; init; }
 
     public static RecordingTarget ForWindow(WindowInfo window) => new(window.Title, window.Handle, null);
@@ -23,7 +23,7 @@ sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayD
 
 /// <summary>
 /// Where a recording writes: a new folder by default, or <see cref="Folder"/> when it shares one with the other
-/// recordings of a Teams call, which record a video each and leave the separate audio files to one audio-only recording.
+/// recordings of an auto-recorded call, which record a video each and leave the separate audio files to one audio-only recording.
 /// </summary>
 sealed record RecordingOutput(string? Folder = null, string VideoFileName = RecordingSession.VideoFileName, bool AudioFiles = true);
 
