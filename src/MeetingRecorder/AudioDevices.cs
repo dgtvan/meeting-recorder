@@ -75,6 +75,27 @@ static class AudioDevices
             : string.Join("; ", users.GroupBy(u => u.DeviceName).Select(g => $"{g.Key}: {string.Join(", ", g.Select(u => u.Process))}"));
     }
 
+    /// <summary>Every process with an audio session on an output device, playing now or earlier: the ones that make sound.</summary>
+    public static HashSet<uint> PlayingProcesses()
+    {
+        var pids = new HashSet<uint>();
+        using var enumerator = new MMDeviceEnumerator();
+        foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+        {
+            using (device)
+            {
+                var sessions = device.AudioSessionManager.Sessions;
+                for (int i = 0; i < sessions.Count; i++)
+                {
+                    using var session = sessions[i];
+                    if (session.GetProcessID != 0)
+                        pids.Add(session.GetProcessID);
+                }
+            }
+        }
+        return pids;
+    }
+
     /// <summary>"muted, volume 80%" for a capture device, for the log; empty when it can't be read.</summary>
     public static string DescribeLevel(string deviceId)
     {

@@ -24,6 +24,7 @@ static unsafe class VideoSoundMuxer
     // Sound is written up to this far ahead of the video, so the file interleaves them.
     private static readonly long LeadTicks = TimeSpan.FromSeconds(1).Ticks;
 
+    private static readonly Guid MF_SINK_WRITER_DISABLE_THROTTLING = new("08b845d8-2b74-4afe-9d53-be16d2d5ae4f");
     private static readonly Guid MF_TRANSCODE_CONTAINERTYPE = new("150FF23F-4ABC-478B-AC4F-E1916FBA1CCA");
     private static readonly Guid MFTranscodeContainerType_MPEG4 = new("DC6CD05D-B9D0-40EF-BD35-FA622C1AB28A");
     private static readonly Guid MF_MT_MAJOR_TYPE = new("48eba18e-f8c9-4687-bf11-0a74c9f96a8f");
@@ -57,8 +58,11 @@ static unsafe class VideoSoundMuxer
             Check(Call(reader, 4, FirstVideoStream, 1));
             Check(CallOut(reader, 6, FirstVideoStream, out videoType));
 
-            Check(MFCreateAttributes(out attributes, 1));
+            Check(MFCreateAttributes(out attributes, 2));
             Check(SetGuid(attributes, MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4));
+            // A screen recording has no frames while nothing changes, so the sound runs far ahead of the video; with
+            // throttling on, the writer would wait for video that never comes before taking more sound.
+            Check(SetUInt32(attributes, MF_SINK_WRITER_DISABLE_THROTTLING, 1));
             Check(MFCreateSinkWriterFromURL(outputPath, 0, attributes, out writer));
 
             int videoStream, soundStream;

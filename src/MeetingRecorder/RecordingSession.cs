@@ -110,7 +110,7 @@ sealed class RecordingSession
 
     /// <summary>The files this recording writes.</summary>
     private IEnumerable<string> OwnFileNames =>
-        (_target.IsAudioOnly ? [] : (string[])[_output.VideoFileName]).Concat(_output.AudioFiles ? RecordingAudio.FileNames : []);
+        (_target.IsAudioOnly ? [] : (string[])[_output.VideoFileName]).Concat(_audio?.FileNamesUsed ?? []);
 
     /// <summary>The program behind what is recorded, whose sound goes to audio-app; null for a display.</summary>
     private AppProcess? App { get; set; }
@@ -405,8 +405,9 @@ sealed class RecordingSession
     /// </summary>
     public static string? FinalizeFiles(string folder, IEnumerable<string>? names = null)
     {
-        names ??= RecordingAudio.FileNames.Concat(Directory.EnumerateFiles(folder, TempFileName("*" + Path.GetExtension(VideoFileName)))
-            .Select(path => Path.GetFileNameWithoutExtension(path)));
+        names ??= Directory.EnumerateFiles(folder, TempFileName("*" + Path.GetExtension(VideoFileName)))
+            .Concat(Directory.EnumerateFiles(folder, TempFileName("*.wav")))
+            .Select(path => Path.GetFileNameWithoutExtension(path));
         var errors = new List<string>();
         foreach (string name in names.ToList())
         {

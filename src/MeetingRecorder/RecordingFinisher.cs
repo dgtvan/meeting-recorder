@@ -89,6 +89,8 @@ static class RecordingFinisher
         public long? End { get; set; }
         public JournalEntry? Stats { get; set; }
         public List<JournalEntry> Sources { get; } = [];
+        /// <summary>Part files mixed into this one (app audio of processes deeper in the app's tree).</summary>
+        public List<string> Parts { get; } = [];
         public TimeSpan Length => TimeSpan.FromTicks((End ?? Start) - Start);
     }
 
@@ -102,7 +104,7 @@ static class RecordingFinisher
         if (RecordingSession.FinalizeFiles(folder) is { } renameError)
             report("warning", renameError);
 
-        foreach (string wav in RecordingAudio.FileNames.Select(name => Path.Combine(folder, name)).Where(File.Exists))
+        foreach (string wav in Directory.EnumerateFiles(folder, "*.wav"))
         {
             if (RepairWav(wav) is { } repaired)
                 report("log", $"{Path.GetFileName(wav)}: {repaired}");
@@ -160,6 +162,7 @@ static class RecordingFinisher
             DropShortVideos(folder, videos, notes, dropped, report);
         }
 
+        MergeAppParts(folder, tracks, report);
         var recording = entries.FirstOrDefault(e => e.Kind == JournalEntry.Recording);
         var system = tracks.FirstOrDefault(t => t.Kind == "system");
         var microphone = tracks.FirstOrDefault(t => t.Kind == "mic");
@@ -244,6 +247,85 @@ static class RecordingFinisher
             videos[i].OriginalFile = videos[i].File;
             videos[i].File = numbered;
         }
+    }
+
+    /// <summary>
+    /// Mixes the app audio part files (processes of the app that play sound from deeper in its tree, recorded apart
+    /// because Windows records a process with its direct children only) into audio-app.wav. They all start together.
+    /// </summary>
+    private static void MergeAppParts(string folder, List<Track> tracks, Action<string, string> report)
+    {
+        var parts = tracks.Where(t => t.Kind == "app").ToList();
+        if (parts.Count < 2)
+            return;
+        var main = parts.FirstOrDefault(t => t.File == RecordingAudio.AppFileName) ?? parts[0];
+        var others = parts.Where(t => t != main).ToList();
+        string path = Path.Combine(folder, main.File);
+        string temp = path + SoundTempSuffix;
+        try
+        {
+            var readers = parts.Select(t => new WaveFileReader(Path.Combine(folder, t.File))).ToList();
+            try
+            {
+                using var writer = new WaveFileWriter(temp, readers[0].WaveFormat);
+                var buffer = new byte[AudioTrack.SampleRate * readers[0].WaveFormat.BlockAlign];
+                var sum = new int[buffer.Length / 2];
+                while (true)
+                {
+                    Array.Clear(sum);
+                    int longest = 0;
+                    foreach (var reader in readers)
+                    {
+                        int read = reader.Read(buffer.AsSpan());
+                        longest = Math.Max(longest, read);
+                        var samples = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, short>(buffer.AsSpan(0, read & ~1));
+                        for (int i = 0; i < samples.Length; i++)
+                            sum[i] += samples[i];
+                    }
+                    if (longest == 0)
+                        break;
+                    var output = new byte[longest];
+                    var mixed = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, short>(output.AsSpan());
+                    for (int i = 0; i < mixed.Length; i++)
+                        mixed[i] = (short)Math.Clamp(sum[i], short.MinValue, short.MaxValue);
+                    writer.Write(output, 0, longest);
+                }
+            }
+            finally
+            {
+                foreach (var reader in readers)
+                    reader.Dispose();
+            }
+            File.Move(temp, path, overwrite: true);
+            foreach (var other in others)
+            {
+                File.Delete(Path.Combine(folder, other.File));
+                main.Parts.Add(other.File);
+                main.Sources.AddRange(other.Sources);
+                main.Stats = Merge(main.Stats, other.Stats);
+                tracks.Remove(other);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException)
+        {
+            TryDelete(temp);
+            report("warning", $"The app audio parts in {Path.GetFileName(folder)} could not be mixed and were kept apart: {ex.Message}");
+        }
+    }
+
+    private static JournalEntry? Merge(JournalEntry? a, JournalEntry? b)
+    {
+        if (a == null || b == null)
+            return a ?? b;
+        var minutes = new double[Math.Max(a.MinutePeaks?.Length ?? 0, b.MinutePeaks?.Length ?? 0)];
+        for (int i = 0; i < minutes.Length; i++)
+            minutes[i] = Math.Max(a.MinutePeaks?.ElementAtOrDefault(i) ?? -100, b.MinutePeaks?.ElementAtOrDefault(i) ?? -100);
+        return a with
+        {
+            SoundSeconds = Math.Max(a.SoundSeconds ?? 0, b.SoundSeconds ?? 0),
+            PeakDb = Math.Max(a.PeakDb ?? -100, b.PeakDb ?? -100),
+            MinutePeaks = minutes,
+        };
     }
 
     /// <summary>Mixes the system audio and microphone of the video's time span into it. A video that can't get its sound keeps none.</summary>
@@ -374,7 +456,7 @@ static class RecordingFinisher
             text.AppendLine($"| `{system.File}` | Everything the PC played: every app, on every speaker or headset (the output device "
                 + $"doesn't matter), stereo. {Sound(system)} | {At(system.Start)} | {Duration(system.Length)} |");
         if (app != null)
-            text.AppendLine($"| `{app.File}` | Only the sound of {appName ?? "the recorded program"} and its child processes, on any output "
+            text.AppendLine($"| `{app.File}` | Only the sound of {appName ?? "the recorded program"} and the processes it started, on any output "
                 + $"device: in a call, the other participants. Also in `{system?.File}`. Stereo. {Sound(app)} | {At(app.Start)} | {Duration(app.Length)} |");
         if (microphone != null)
             text.AppendLine($"| `{microphone.File}` | The microphone in use, mono; see *Microphone* for which one when. {Sound(microphone)} "
@@ -416,7 +498,11 @@ static class RecordingFinisher
         foreach (string file in dropped)
             renamed[file] = $"{file} (dropped)";
         foreach (var track in tracks)
+        {
             renamed[Path.ChangeExtension(track.File, ".wav")] = track.File;
+            foreach (string part in track.Parts)
+                renamed[part] = $"{track.File} (part {part})";
+        }
         foreach (var entry in entries)
         {
             if (entry.File != null && renamed.TryGetValue(entry.File, out string? final))
