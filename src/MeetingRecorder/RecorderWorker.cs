@@ -7,7 +7,8 @@ namespace MeetingRecorder;
 /// The native capture and encoder stack keeps a few hundred MB after a recording ends, so each recording
 /// runs in its own process and the tray process stays small. The protocol is one line per message:
 /// the tray writes "stop" to stdin (EOF also stops), the worker answers on stdout with
-/// "folder &lt;path&gt;", "started", any number of "warning &lt;text&gt;" (sent as they happen),
+/// "folder &lt;path&gt;", "started", any number of "warning &lt;text&gt;" (sent as they happen) and "log &lt;text&gt;"
+/// (for the audio log: sources, switches, device changes),
 /// "stopping" when the files start being saved,
 /// then "fallback" and "note &lt;text&gt;" if they apply, and finally "finished" or "failed &lt;text&gt;".
 /// </remarks>
@@ -66,6 +67,7 @@ static class RecorderWorker
             Send("started");
         };
         session.Warning += warning => Send("warning", warning);
+        session.Log += text => Send("log", text);
         session.Stopping += () =>
         {
             overlay?.Dispose();
@@ -128,14 +130,22 @@ static class RecorderWorker
             args += $" --video-file \"{output.VideoFileName}\"";
         if (!output.AudioFiles)
             args += " --no-audio-files";
+        if (target.AppProcessId is { } pid)
+            args += $" --app-pid {pid}";
         return skipGraphicsCapture ? args + " --crop" : args;
     }
 
     private static RecordingTarget ParseTarget(string[] args)
     {
+        var target = ParseSource(args);
+        return Value(args, "--app-pid") is { } pid ? target with { AppProcessId = uint.Parse(pid) } : target;
+    }
+
+    private static RecordingTarget ParseSource(string[] args)
+    {
         string name = Value(args, "--name") ?? throw new ArgumentException("--name is required");
         if (args.Contains("--audio-only"))
-            return RecordingTarget.ForAudio(name);
+            return RecordingTarget.ForAudio(name, null);
         if (Value(args, "--file") is { } file)
             return new RecordingTarget(name, IntPtr.Zero, null, Path.GetFullPath(file));
         if (Value(args, "--window") is { } hwnd)

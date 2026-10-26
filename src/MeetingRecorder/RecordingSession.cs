@@ -1,6 +1,3 @@
-using System.Runtime.InteropServices;
-using NAudio.CoreAudioApi;
-using NAudio.Wave;
 using ScreenRecorderLib;
 
 namespace MeetingRecorder;
@@ -14,11 +11,24 @@ sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayD
     /// <summary>Records no video, only the separate audio files: the audio of an auto-recorded call, which has a video per window.</summary>
     public bool IsAudioOnly { get; init; }
 
+    /// <summary>
+    /// The program whose sound goes to audio-app: the meeting app of a call's audio. For a window it is found from the
+    /// window when not set; a display has none.
+    /// </summary>
+    public uint? AppProcessId { get; init; }
+
+    /// <summary>What is recorded, for the journal and README.md.</summary>
+    public string Description => IsAudioOnly ? Name
+        : SourceFile != null ? $"the video file {SourceFile} (a test)"
+        : WindowHandle != IntPtr.Zero ? $"the window \"{Name}\""
+        : $"the whole display {DisplayDeviceName}";
+
     public static RecordingTarget ForWindow(WindowInfo window) => new(window.Title, window.Handle, null);
 
     public static RecordingTarget ForDisplay(string deviceName) => new("fullscreen", IntPtr.Zero, deviceName);
 
-    public static RecordingTarget ForAudio(string name) => new(name, IntPtr.Zero, null) { IsAudioOnly = true };
+    public static RecordingTarget ForAudio(string name, uint? appProcessId) =>
+        new(name, IntPtr.Zero, null) { IsAudioOnly = true, AppProcessId = appProcessId };
 }
 
 /// <summary>
@@ -28,35 +38,26 @@ sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayD
 sealed record RecordingOutput(string? Folder = null, string VideoFileName = RecordingSession.VideoFileName, bool AudioFiles = true);
 
 /// <summary>
-/// One recording: a new folder holding video.mp4 (with system audio and microphone mixed in, for easy review) plus a
-/// separate audio file per source, recorded as WAV and converted to AAC (.m4a) after the recording stops unless
-/// <see cref="AppSettings.CompressAudio"/> is off.
+/// One recording: video.mp4, recorded without sound, plus the separate audio files (<see cref="RecordingAudio"/>) as
+/// WAV, and a journal of what was recorded from where. <see cref="RecordingFinisher"/> then mixes the sound into the
+/// video, compresses the audio and writes README.md.
 /// </summary>
 /// <remarks>All events are raised on the UI thread.</remarks>
 sealed class RecordingSession
 {
     public const string VideoFileName = "video.mp4";
-    public const string SystemAudioFileName = "audio-system.wav";
-    public const string MicrophoneFileName = "audio-mic.wav";
-    private const string CompressedAudioExtension = ".m4a";
-    private static readonly string[] AudioFileNames = [SystemAudioFileName, MicrophoneFileName];
-
-    // The lowest bitrates the Windows AAC encoder offers; transparent for meeting audio.
-    private const int StereoAacBitrate = 128_000;
-    private const int MonoAacBitrate = 96_000;
 
     private readonly SynchronizationContext _ui;
     private readonly AppSettings _settings;
     private readonly RecordingTarget _target;
     private readonly RecordingOutput _output;
-    private readonly List<AudioFileRecorder> _audio = [];
+    private readonly RecordingJournal _journal;
 
     private Recorder? _recorder;
     private WindowTracker? _tracker;
+    private RecordingAudio? _audio;
     private Task? _audioStopped;
     private bool _videoStarted;
-    // Cleared when the recorder can't start with audio, so a broken audio device never costs the video.
-    private bool _videoAudio = true;
     private bool _stopRequested;
     private bool _finished;
 
@@ -79,6 +80,9 @@ sealed class RecordingSession
     /// </summary>
     public event Action<string>? Warning;
 
+    /// <summary>A line for the audio log: which sources are recorded, every switch and device change.</summary>
+    public event Action<string>? Log;
+
     /// <summary>Why the recording ended when the user didn't stop it and nothing went wrong, e.g. the window closed.</summary>
     public string? EndNote { get; private set; }
 
@@ -98,17 +102,29 @@ sealed class RecordingSession
         FolderPath = output.Folder is { } folder
             ? Directory.CreateDirectory(folder).FullName
             : CreateFolder(settings.RecordingsRoot, StartedAt, target.Name);
+        _journal = new RecordingJournal(FolderPath, target.IsAudioOnly ? "audio" : output.VideoFileName);
     }
 
     public static RecordingSession Create(SynchronizationContext ui, AppSettings settings, RecordingTarget target,
         RecordingOutput? output = null) => new(ui, settings, target, output ?? new RecordingOutput());
 
-    /// <summary>The files this recording writes, by their names before the audio is compressed.</summary>
+    /// <summary>The files this recording writes.</summary>
     private IEnumerable<string> OwnFileNames =>
-        (_target.IsAudioOnly ? [] : (string[])[_output.VideoFileName]).Concat(_output.AudioFiles ? AudioFileNames : []);
+        (_target.IsAudioOnly ? [] : (string[])[_output.VideoFileName]).Concat(_output.AudioFiles ? RecordingAudio.FileNames : []);
+
+    /// <summary>The program behind what is recorded, whose sound goes to audio-app; null for a display.</summary>
+    private AppProcess? App { get; set; }
 
     public void Start()
     {
+        App = _target.AppProcessId is { } pid ? ProcessTree.Describe(pid)
+            : _target.WindowHandle != IntPtr.Zero ? ProcessTree.ForWindow(_target.WindowHandle)
+            : null;
+        _journal.Write(new JournalEntry
+        {
+            Kind = JournalEntry.Recording, Target = _target.Name, Text = _target.Description,
+            Auto = _output.Folder != null, App = App?.ToString(),
+        });
         if (_target.IsAudioOnly)
         {
             StartCapturing();
@@ -183,7 +199,8 @@ sealed class RecordingSession
         {
             SourceOptions = new SourceOptions { RecordingSources = [source] },
             OutputOptions = output,
-            AudioOptions = VideoAudioOptions(),
+            // The sound is added once the recording is saved, from the audio files, which follow device changes.
+            AudioOptions = new AudioOptions { IsAudioEnabled = false },
             VideoEncoderOptions = new VideoEncoderOptions
             {
                 Encoder = new H264VideoEncoder
@@ -203,20 +220,7 @@ sealed class RecordingSession
             MouseOptions = new MouseOptions { IsMousePointerEnabled = _settings.CaptureMouseCursor },
         };
 
-        try
-        {
-            Record(options);
-        }
-        catch (Exception ex) when (_videoAudio)
-        {
-            // Audio sources are checked when recording starts; the video must not depend on them.
-            _recorder?.Dispose();
-            _recorder = null;
-            _videoAudio = false;
-            Warning?.Invoke(NoVideoSoundWarning(ex.Message));
-            options.AudioOptions = VideoAudioOptions();
-            Record(options);
-        }
+        Record(options);
     }
 
     private void Record(RecorderOptions options)
@@ -230,18 +234,12 @@ sealed class RecordingSession
         recorder.Record(Path.Combine(FolderPath, TempFileName(_output.VideoFileName)));
     }
 
-    private static string NoVideoSoundWarning(string error) =>
-        $"The video has no sound this time (the separate audio files are still recorded): {error}";
-
     private void OnVideoFailed(string error)
     {
         bool canFallBack = _target.WindowHandle != IntPtr.Zero && _tracker == null && !_videoStarted && !_stopRequested;
         if (!canFallBack)
         {
-            if (_videoAudio && !_videoStarted && !_stopRequested)
-                RetryWithoutVideoAudio(error);
-            else
-                OnVideoEnded(error);
+            OnVideoEnded(error);
             return;
         }
 
@@ -257,72 +255,6 @@ sealed class RecordingSession
         {
             OnVideoEnded($"{error}\nFallback capture also failed: {ex.Message}");
         }
-    }
-
-    private void RetryWithoutVideoAudio(string error)
-    {
-        _videoAudio = false;
-        _recorder!.Dispose();
-        _recorder = null;
-        _tracker?.Dispose();
-        _tracker = null;
-        Warning?.Invoke(NoVideoSoundWarning(error));
-        try
-        {
-            Start();
-        }
-        catch (Exception ex)
-        {
-            OnVideoEnded($"{error}\nRetry without sound in the video also failed: {ex.Message}");
-        }
-    }
-
-    /// <summary>The same sources as the separate audio files, mixed into one AAC track of the video.</summary>
-    private AudioOptions VideoAudioOptions()
-    {
-        var sources = new List<AudioSourceBase>();
-        if (_videoAudio)
-        {
-            if (VideoAudioDevice(DataFlow.Render, _settings.SystemAudioDeviceId) is { } system)
-                sources.Add(new LoopbackAudioSource(system));
-            if (VideoAudioDevice(DataFlow.Capture, _settings.MicrophoneDeviceId) is { } mic)
-                sources.Add(new CaptureAudioSource(mic));
-        }
-        return new AudioOptions
-        {
-            IsAudioEnabled = sources.Count > 0,
-            AudioSources = sources,
-            Bitrate = AudioBitrate.bitrate_128kbps,
-            Channels = AudioChannels.Stereo,
-        };
-    }
-
-    /// <summary>
-    /// The endpoint id to give the recorder, which needs a real id (an empty one throws): the chosen device, or the
-    /// Windows default when that is chosen or the device is gone, like the separate audio files do. Null when the
-    /// source is off or there is no such device.
-    /// </summary>
-    private static string? VideoAudioDevice(DataFlow flow, string deviceId)
-    {
-        if (deviceId == AppSettings.DisabledDevice)
-            return null;
-        using var enumerator = new MMDeviceEnumerator();
-        if (deviceId != AppSettings.DefaultDevice)
-        {
-            try
-            {
-                using var device = enumerator.GetDevice(deviceId);
-                if (device.State == DeviceState.Active)
-                    return deviceId;
-            }
-            catch (COMException)
-            {
-            }
-        }
-        if (!enumerator.TryGetDefaultAudioEndpoint(flow, Role.Console, out var fallback))
-            return null;
-        using (fallback)
-            return fallback!.ID;
     }
 
     private static ScreenRect ToScreenRect(Rectangle r) => new(r.X, r.Y, r.Width, r.Height);
@@ -377,41 +309,34 @@ sealed class RecordingSession
     private void StartCapturing()
     {
         _videoStarted = true;
+        if (!_target.IsAudioOnly)
+            _journal.Write(new JournalEntry
+            {
+                Kind = JournalEntry.VideoStart, File = _output.VideoFileName, Target = _target.Name, Text = _target.Description, App = App?.ToString(),
+            });
         if (_output.AudioFiles)
         {
-            StartAudio(DataFlow.Render, _settings.SystemAudioDeviceId, SystemAudioFileName, "System audio");
-            StartAudio(DataFlow.Capture, _settings.MicrophoneDeviceId, MicrophoneFileName, "Microphone");
+            _audio = new RecordingAudio(_ui, _settings, FolderPath, App, _journal);
+            _audio.Warning += text => Warning?.Invoke(text);
+            _audio.Log += text => Log?.Invoke(text);
+            _ = StartAudio(_audio);
         }
         Started?.Invoke(this);
     }
 
-    private void StartAudio(DataFlow flow, string deviceId, string fileName, string label)
+    private async Task StartAudio(RecordingAudio audio)
     {
-        if (deviceId == AppSettings.DisabledDevice)
-            return;
         try
         {
-            var recorder = AudioFileRecorder.TryCreate(flow, deviceId, Path.Combine(FolderPath, TempFileName(fileName)));
-            if (recorder == null)
-            {
-                Warning?.Invoke($"{label} is not being recorded: no audio device found.");
-                return;
-            }
-            recorder.Failed += failed => _ui.Post(_ =>
-                Warning?.Invoke($"{label} stopped recording ({failed.DeviceName}): {failed.Error!.Message}"), null);
-            recorder.Start();
-            _audio.Add(recorder);
-            if (recorder.UsedDefaultInstead)
-                Warning?.Invoke($"{label}: the chosen device is not available, recording from {recorder.DeviceName} instead.");
+            await audio.StartAsync();
         }
         catch (Exception ex)
         {
-            Warning?.Invoke($"{label} is not being recorded: {ex.Message}");
+            Warning?.Invoke($"The audio is not being recorded: {ex.Message}");
         }
     }
 
-    private Task StopAudio() =>
-        _audioStopped ??= Task.WhenAll(_audio.Select(a => a.StopAsync()));
+    private Task StopAudio() => _audioStopped ??= _audio?.StopAsync() ?? Task.CompletedTask;
 
     private async void OnVideoEnded(string? error)
     {
@@ -421,7 +346,16 @@ sealed class RecordingSession
             Stopping?.Invoke();
         _finished = true;
 
-        await StopAudio();
+        try
+        {
+            await StopAudio();
+        }
+        catch (Exception ex)
+        {
+            Warning?.Invoke($"The audio files may be incomplete: {ex.Message}");
+        }
+        if (!_target.IsAudioOnly && _videoStarted)
+            _journal.Write(new JournalEntry { Kind = JournalEntry.VideoEnd, File = _output.VideoFileName, Error = error });
         if (error == null && !_stopRequested)
         {
             if (_target.WindowHandle != IntPtr.Zero && !WindowList.IsAlive(_target.WindowHandle))
@@ -433,13 +367,6 @@ sealed class RecordingSession
         _tracker?.Dispose();
         _recorder?.Dispose();
         _recorder = null;
-        if (_settings.CompressAudio && _output.AudioFiles)
-        {
-            // One after the other: converting both at once measured slower.
-            string?[] compressErrors = await Task.Run(() => AudioFileNames.Select(name => CompressAudio(FolderPath, name)).ToArray());
-            foreach (string? compressError in compressErrors.Where(e => e != null))
-                Warning?.Invoke(compressError!);
-        }
         if (FinalizeFiles(FolderPath, OwnFileNames) is { } renameError)
             Warning?.Invoke(renameError);
         if (error != null)
@@ -471,67 +398,24 @@ sealed class RecordingSession
     /// </summary>
     public static string TempFileName(string fileName) => fileName + ".tmp";
 
-    private static string CompressedName(string wavName) => Path.ChangeExtension(wavName, CompressedAudioExtension);
-
-    /// <summary>
-    /// Converts one finished WAV in the folder to AAC, then deletes the WAV. A WAV that can't be converted is kept.
-    /// Returns the problem as a warning message, or null.
-    /// </summary>
-    private static string? CompressAudio(string folder, string wavName)
-    {
-        string wav = Path.Combine(folder, TempFileName(wavName));
-        string target = Path.Combine(folder, CompressedName(wavName));
-        string temp = TempFileName(target);
-        if (!File.Exists(wav))
-            return null;
-        try
-        {
-            using (var reader = new WaveFileReader(wav))
-            {
-                if (reader.Length == 0)
-                    return null;
-                // The stream overload writes MP4 regardless of the file name; the path overload goes by the extension.
-                using var output = new FileStream(temp, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
-                MediaFoundationEncoder.EncodeToAac(reader, output,
-                    reader.WaveFormat.Channels == 1 ? MonoAacBitrate : StereoAacBitrate);
-            }
-            File.Move(temp, target);
-            File.Delete(wav);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            TryDelete(temp);
-            return $"{wavName} could not be compressed and was kept as WAV: {ex.Message}";
-        }
-    }
-
     /// <summary>
     /// Gives the files <paramref name="names"/> in a recording folder their final names; every file in it when null,
     /// which must wait until nothing writes to the folder any more. Safe to call again, e.g. after the worker was
-    /// killed (a fragmented MP4 cut short is still playable; a half-written .m4a is dropped and its WAV kept).
-    /// Returns an error message, or null.
+    /// killed (a fragmented MP4 cut short is still playable, and so is a WAV). Returns an error message, or null.
     /// </summary>
     public static string? FinalizeFiles(string folder, IEnumerable<string>? names = null)
     {
-        names ??= AudioFileNames.Concat(Directory.EnumerateFiles(folder, TempFileName("*" + Path.GetExtension(VideoFileName)))
+        names ??= RecordingAudio.FileNames.Concat(Directory.EnumerateFiles(folder, TempFileName("*" + Path.GetExtension(VideoFileName)))
             .Select(path => Path.GetFileNameWithoutExtension(path)));
         var errors = new List<string>();
         foreach (string name in names.ToList())
         {
-            bool isAudio = AudioFileNames.Contains(name);
             string temp = Path.Combine(folder, TempFileName(name));
-            if (isAudio)
-                TryDelete(Path.Combine(folder, TempFileName(CompressedName(name))));
             if (!File.Exists(temp))
                 continue;
             try
             {
-                // The compressed copy is complete once it has its final name; only deleting the WAV was cut short.
-                if (isAudio && File.Exists(Path.Combine(folder, CompressedName(name))))
-                    File.Delete(temp);
-                else
-                    File.Move(temp, Path.Combine(folder, name));
+                File.Move(temp, Path.Combine(folder, name));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -540,17 +424,6 @@ sealed class RecordingSession
         }
         return errors.Count == 0 ? null
             : $"Could not finish saving {Path.GetFileName(folder)} ({string.Join("; ", errors)}). Rename the .tmp files by hand.";
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-        }
     }
 
     /// <summary>Creates a new recording folder, <c>yyyy-MM-dd_HH-mm-ss-&lt;target name&gt;</c>, and returns its path.</summary>

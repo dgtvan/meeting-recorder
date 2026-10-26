@@ -36,9 +36,9 @@ function Write-Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
 
 # Standard section 3.5: ask the app to close, and let it refuse while it is busy.
 function Stop-App {
-    # This account's processes only; --meeting-status is a short diagnostic run.
+    # This account's processes only; --meeting-status and --audio-status are short diagnostic runs.
     $own = @(Get-CimInstance Win32_Process -Filter "Name = '$ExeName'" | Where-Object {
-        $_.CommandLine -notmatch '--meeting-status' -and
+        $_.CommandLine -notmatch '--meeting-status|--audio-status' -and
             (Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User -eq $env:USERNAME
     })
     if ($own.Count -eq 0) { return }
@@ -75,8 +75,9 @@ function Stop-App {
 
     Write-Step "Closing $AppName (-Force)"
     # Killing the tray process ends a recording safely: the worker sees its stdin close, saves the files and exits.
-    $workers = @($own | Where-Object { $_.CommandLine -match '--record' })
-    $own | Where-Object { $_.CommandLine -notmatch '--record' } |
+    # A recording finisher (--finish) is left to complete too; one killed is redone when the app next starts.
+    $workers = @($own | Where-Object { $_.CommandLine -match '--record|--finish' })
+    $own | Where-Object { $_.CommandLine -notmatch '--record|--finish' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     if ($workers.Count -gt 0) {
         Write-Step 'Waiting for the recording to be saved'

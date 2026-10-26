@@ -3,7 +3,8 @@ using System.Diagnostics;
 namespace MeetingRecorder;
 
 /// <summary>
-/// Tray-side handle to a recording running in a <see cref="RecorderWorker"/> child process.
+/// Tray-side handle to a recording running in a <see cref="RecorderWorker"/> child process, or to a
+/// <see cref="RecordingFinisher"/> finishing a recording folder.
 /// </summary>
 /// <remarks>All events are raised on the UI thread.</remarks>
 sealed class RecordingProcess
@@ -37,16 +38,31 @@ sealed class RecordingProcess
     /// <summary>Raised as soon as the worker reports something the user should act on.</summary>
     public event Action<RecordingProcess, string>? Warning;
 
+    /// <summary>A line for the logs: what audio is recorded from where, device changes, files renamed.</summary>
+    public event Action<RecordingProcess, string>? Log;
+
+    /// <summary>The finisher deleted a file or the whole recording on purpose, e.g. a call shorter than 30 s.</summary>
+    public event Action<RecordingProcess, string>? Dropped;
+
     /// <summary>Raised once the worker has exited. The argument is an error message, or null on success.</summary>
     public event Action<RecordingProcess, string?>? Finished;
 
     public RecordingProcess(SynchronizationContext ui, RecordingTarget target, RecordingOutput output)
+        : this(ui, target.Name, RecorderWorker.BuildArguments(target, output, s_skipGraphicsCapture))
+    {
+    }
+
+    /// <summary>Finishes a recording folder (<see cref="RecordingFinisher"/>).</summary>
+    public static RecordingProcess ForFinishing(SynchronizationContext ui, string folder, bool auto) =>
+        new(ui, Path.GetFileName(folder), RecordingFinisher.BuildArguments(folder, auto)) { FolderPath = folder };
+
+    private RecordingProcess(SynchronizationContext ui, string targetName, string arguments)
     {
         _ui = ui;
-        TargetName = target.Name;
+        TargetName = targetName;
         _process = new Process
         {
-            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, RecorderWorker.BuildArguments(target, output, s_skipGraphicsCapture))
+            StartInfo = new ProcessStartInfo(Environment.ProcessPath!, arguments)
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -118,6 +134,12 @@ sealed class RecordingProcess
                 break;
             case "warning":
                 Warning?.Invoke(this, text);
+                break;
+            case "log":
+                Log?.Invoke(this, text);
+                break;
+            case "dropped":
+                Dropped?.Invoke(this, text);
                 break;
             case "note":
                 EndNote = text;

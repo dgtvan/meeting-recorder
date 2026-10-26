@@ -1,7 +1,8 @@
 # Meeting Recorder
 
-A lightweight Windows system-tray app that records a window or a full screen as video, with system audio
-and microphone saved to **separate** audio files.
+A lightweight Windows system-tray app that records a window or a full screen as video, with the system audio, the
+recorded app's own sound and the microphone saved to **separate** audio files, and a `README.md` in every recording
+folder that says what each file holds.
 
 ## Features
 
@@ -16,24 +17,30 @@ and microphone saved to **separate** audio files.
 - **Auto-record meetings** (on by default for each supported app, so far Microsoft Teams): see [below](#auto-recording-meetings).
 - **Recordings**: the 10 most recent recordings, each with *Open folder* and its files (the one being recorded
   is listed but can't be opened until it is saved); plus *Open recordings folder*.
-- **System audio** / **Microphone**: choose the device, follow the Windows default, or turn the source off.
+- **System audio**: on (every app, on any speaker or headset) or off. **Microphone**: automatic (the one in use, see
+  [Audio](#audio)), a device of your choice, or off.
 - Every recording gets its own folder (an auto-recorded call has [one per call](#auto-recording-meetings)):
-  `yyyy-MM-dd_HH-mm-ss-<window title|fullscreen>`, containing
+  `yyyy-MM-dd_HH-mm-ss-<window title|fullscreen>`, containing the same files whatever is recorded (a window of any
+  app, a meeting, a full screen):
 
   | File | Content |
   |---|---|
-  | `video.mp4` | H.264 video, scaled down to 1080 lines when the source is taller, with system audio and microphone mixed into one AAC track for easy review |
-  | `audio-system.m4a` | What the PC plays (loopback), AAC 48 kHz stereo 128 kbps |
-  | `audio-mic.m4a` | Microphone, AAC 48 kHz mono 96 kbps |
+  | `video.mp4` | H.264 video, scaled down to 1080 lines when the source is taller, with `audio-system` and `audio-mic` mixed into one AAC track for watching |
+  | `audio-system.m4a` | Everything the PC plays: every app, on every speaker or headset. AAC 48 kHz stereo 128 kbps |
+  | `audio-app.m4a` | Only the sound of the program that owns the recorded window (and its child processes): in a call, the other participants. Not made for a full screen. AAC 48 kHz stereo 128 kbps |
+  | `audio-mic.m4a` | The microphone in use, following a change mid-recording. AAC 48 kHz mono 96 kbps |
+  | `README.md` | What each file holds, where it starts on the recording's clock, how long it is and whether it has sound; which microphone was used when and why; every device change during the recording |
 
-  The separate audio files are for analysis (each source on its own); all three start at the first video frame, so
-  they line up with the video. If the recorder can't open the audio devices for the video, the video is recorded
-  without sound and a warning says so; the separate files are still recorded.
-  Audio is recorded as WAV (no encoding work while recording, and safe if the PC crashes) and converted to AAC
-  when the recording stops. With `CompressAudio` off, or if a conversion fails, the WAV is kept instead
-  (`audio-system.wav`, 16-bit stereo; `audio-mic.wav`, 16-bit mono).
+  The separate audio files are for analysis (each source on its own); they start together, and README.md gives each
+  file's start, so a video that starts later (a second meeting window) can be lined up with them.
+  Audio is recorded as WAV (no encoding work while recording, and safe if the PC crashes); once the recording is
+  saved, a finisher (`MeetingRecorder.exe --finish`) mixes the sound into the videos, converts the audio to AAC and
+  writes README.md. With `CompressAudio` off, or if a conversion fails, the WAV is kept instead (`audio-system.wav`,
+  `audio-app.wav`, 16-bit stereo; `audio-mic.wav`, 16-bit mono).
   While a recording is running or being saved, the files have `.tmp` appended (`video.mp4.tmp`,
-  `audio-system.wav.tmp`, ...); they get their final names once saving is done.
+  `audio-system.wav.tmp`, ...); they get their final names once saving is done. Each recorder also keeps a journal
+  (`*.journal.jsonl`) in the folder, which the finisher turns into README.md and deletes; a folder whose finisher
+  never ran (the app was killed) is finished the next time the app starts.
 
 Recordings go to `%USERPROFILE%\Videos\Meeting Recordings` by default. Change it with *Change recordings folder...* in the
 tray menu (only while idle); new recordings go to the new folder, existing ones stay where they are.
@@ -52,8 +59,10 @@ starts with none, and the log keeps the earlier ones.
 It's raised when:
 - a recording fails to start, stops by itself, or the recorder crashes or hangs (30 s to start; 2 min plus 5 s per
   recorded minute to save);
-- system audio or the microphone can't be recorded, stops mid-recording (e.g. headset unplugged), or the
-  chosen device is missing and the Windows default is used instead;
+- system audio, app audio or the microphone can't be recorded (system and app audio are retried every 2 s), or the
+  microphone chosen in the menu is missing and the one in use is recorded instead (a microphone that is unplugged
+  while recorded automatically is just replaced; that is logged, not a warning);
+- a video can't get its sound added, or the audio can't be compressed;
 - the recordings drive has less than 2 GB free;
 - the app hits an unexpected error.
 
@@ -67,7 +76,8 @@ Measurements and the reasoning behind the defaults: [docs/performance.md](docs/p
 - Idle in the tray: about 55 MB RAM and no CPU.
 - While recording: about 1% CPU on a 2560x1440 screen, using the GPU's H.264 encoder at a variable
   frame rate (a static screen costs almost nothing). Audio is written as WAV, so it needs no encoding while recording.
-- Saving: converting the audio to AAC takes about 1–1.5 seconds per recorded minute.
+- Saving: mixing the sound into the video and converting the three audio files to AAC takes a few seconds per
+  recorded minute, in a separate finisher process.
 - Each recording runs in a short-lived child process (`MeetingRecorder.exe --record ...`). The native
   capture stack holds ~250 MB that it never gives back, so isolating it means memory returns to the system
   as soon as a recording ends. It also stops cleanly if the tray process dies.
@@ -84,8 +94,9 @@ during the call and one set of audio files:
 
 | File | Content |
 |---|---|
-| `video.mp4`, `video-2.mp4`, ... | One per meeting window, in the order they opened (e.g. the meeting and a second window Teams opens while you share, or a call on hold); each has the call's sound mixed in |
-| `audio-system.m4a`, `audio-mic.m4a` | The whole call, recorded once, from the first window's start until the call ends |
+| `video.mp4`, `video-2.mp4`, ... | One per meeting window, in the order they opened (e.g. the meeting and a second window Teams opens while you share, or a call on hold); each has the call's sound for its own time span mixed in |
+| `audio-system.m4a`, `audio-app.m4a`, `audio-mic.m4a` | The whole call, recorded once, from the first window's start until the call ends; `audio-app` is the meeting app's own sound (the other participants), `audio-mic` the microphone the meeting app uses |
+| `README.md` | As for any recording; *Starts at* lines each video up with the audio files |
 
 Supported apps: **Microsoft Teams** (new Teams).
 
@@ -97,9 +108,9 @@ Supported apps: **Microsoft Teams** (new Teams).
   microphone.
 - If Teams replaces the meeting window during the call (the pre-join screen becomes the meeting window when you
   join), the new window gets the next video and the audio carries on.
-- After the call: a call shorter than 30 s (a pre-join screen, a call left at once) is deleted; otherwise videos
-  shorter than 30 s are deleted, the rest renumbered, and the folder renamed after the window recorded longest.
-  Each deletion is noted in `warnings.log` without raising a warning.
+- After the call, the finisher deletes a call shorter than 30 s (a pre-join screen, a call left at once); otherwise
+  it deletes videos shorter than 30 s, renumbers the rest, and renames the folder after the window recorded longest.
+  Each deletion is noted in `warnings.log` and README.md without raising a warning.
 - Teams also opens windows with the meeting's title that show nothing (minimized, off screen, tiny or hidden from
   screen capture); they're skipped until they show. If such a window still can't be captured while another window
   of the call is recorded, that's only noted in `warnings.log`.
@@ -123,6 +134,35 @@ app is in a call (`IsCallActive`, usually `MeetingWindows.IsCapturingMicrophone`
 show the meeting (`FindMeetingWindows`), plus `FindAppWindows` for the log. Add it to `MeetingApps.All`. The tray
 menu, the `AutoRecord` setting, recording, the per-call folder, `meetings.log` and `--meeting-status` all follow
 from that list. `TeamsMeetingApp` is the example.
+
+## Audio
+
+The audio files don't depend on which speaker, headset or microphone is in use, so plugging in a headset or a
+speakerphone before or during a meeting changes nothing:
+
+- **System audio** records every app's sound (Windows process loopback of every process but the recorder), whatever
+  device each app plays on. A meeting app that switches to a Bluetooth headset or a USB speakerphone is still
+  recorded.
+- **App audio** records only the program behind the recorded window and its child processes (a browser's audio
+  process, Teams' web views): for a call, the other participants without notifications or music. A Store app's
+  window belongs to a host shared by all Store apps, so its own process is used; when no single program can be
+  told apart (a full screen), there is no `audio-app` file and README.md says why.
+- **Microphone**, when automatic: the one the recorded program has open; else one another app has open; else the one
+  being recorded while it's still connected; else the Windows default. It is checked every 2 s and on every device
+  change, and switched within the same file when a different one is seen twice in a row (so a meeting app that
+  reopens its microphone doesn't cause a switch back and forth); a microphone that stops (unplugged) is replaced at
+  once. Muting in the meeting app keeps its microphone open, so it doesn't count as a change.
+
+Everything about the audio is logged for investigating a recording afterwards:
+
+- `audio.log` in the data folder (rolled over to `audio.old.log` at 1 MB): every device plugged in or out, added,
+  removed, enabled or disabled, and every new Windows default device, while the app runs, also when not recording;
+  the devices and which apps use them when the app starts and when each recording starts; per recording (prefixed
+  with its name), what each audio file records, every microphone switch with the reason and which apps had which
+  microphone open, a source that stopped or failed, and each file's sound statistics at the end.
+- README.md in the recording folder: the same for that recording, on the recording's clock.
+- `MeetingRecorder.exe --audio-status` prints every audio device with its state, default roles, volume and mute, which
+  apps are playing or recording on it, and which microphone a recording would use now. It captures nothing.
 
 ## Window recording
 
@@ -149,9 +189,10 @@ left in place.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `SchemaVersion` | `2` | Managed by the app; older files are migrated at startup |
+| `SchemaVersion` | `3` | Managed by the app; older files are migrated at startup |
 | `RecordingsRoot` | `Videos\Meeting Recordings` | Where recording folders are created |
-| `SystemAudioDeviceId` / `MicrophoneDeviceId` | `""` | `""` = Windows default, `"off"` = don't record, else a device id (set via the menu) |
+| `SystemAudioDeviceId` | `""` | `"off"` = no system or app audio; anything else records every app on any device (schema 3 turned a chosen output device into `""`) |
+| `MicrophoneDeviceId` | `""` | `""` = automatic, the one in use; `"off"` = don't record; else a device id (set via the menu), recorded while it's connected |
 | `VideoFramerate` | `15` | Maximum frames per second |
 | `VideoQuality` | `60` | 1–100; lower = smaller files |
 | `MaxVideoHeight` | `1080` | Taller sources (e.g. a 1440p or 4K screen) are scaled down to this height; `0` = never scale |
@@ -162,7 +203,7 @@ left in place.
 
 ## Requirements
 
-- Windows 10 1903+ / Windows 11, x64
+- Windows 10 2004+ / Windows 11, x64 (2004 added per-process audio capture)
 - [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
 - [Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) (needed by ScreenRecorderLib)
 
@@ -200,4 +241,4 @@ deploy.cmd                              # release build, installed and started f
 ## Libraries
 
 - [ScreenRecorderLib](https://github.com/sskodje/ScreenRecorderLib) (MIT): screen/window capture and H.264 encoding via Media Foundation
-- [NAudio](https://github.com/naudio/NAudio) (MIT): WASAPI loopback and microphone capture
+- [NAudio](https://github.com/naudio/NAudio) (MIT): WASAPI process loopback and microphone capture, AAC encoding

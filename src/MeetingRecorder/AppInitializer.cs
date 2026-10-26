@@ -6,7 +6,7 @@ namespace MeetingRecorder;
 /// </summary>
 static class AppInitializer
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     /// <summary>
     /// Creates the data folder and, when it is new, copies the data from the locations used before standard v2.0.
@@ -47,6 +47,9 @@ static class AppInitializer
             if (settings.AutoRecordTeams is { } teams)
                 settings.AutoRecord.TryAdd("teams", teams);
             settings.AutoRecordTeams = null;
+            // Version 2 -> 3: system audio is every app's sound on any device, so a chosen output device means on.
+            if (settings.SystemAudioDeviceId != AppSettings.DisabledDevice)
+                settings.SystemAudioDeviceId = AppSettings.DefaultDevice;
             settings.SchemaVersion = CurrentSchemaVersion;
             TryRun(problems, "Could not write the default settings", settings.Save);
         }

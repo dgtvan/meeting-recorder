@@ -13,6 +13,13 @@ sealed class ActiveRecording(RecordingProcess process, RecordingTarget target, M
     /// <summary>The audio of a call, recorded next to its window videos; not listed as a recording of its own.</summary>
     public bool IsAudio => Target.IsAudioOnly;
     public string VideoFile { get; } = videoFile;
+    /// <summary>
+    /// A <see cref="RecordingFinisher"/> run on a folder whose recordings are saved: mixing the sound into the videos,
+    /// compressing the audio and writing README.md. It starts in <see cref="RecordingPhase.Saving"/>.
+    /// </summary>
+    public bool IsFinishing { get; init; }
+    /// <summary>How long the recording being finished is, which sets how long finishing may take.</summary>
+    public TimeSpan RecordedFor { get; init; }
     public RecordingPhase Phase { get; private set; } = RecordingPhase.Starting;
     public DateTime PhaseSince { get; private set; } = DateTime.UtcNow;
     public bool IsCapturing => Phase is RecordingPhase.Starting or RecordingPhase.Recording;
@@ -39,5 +46,7 @@ sealed class MeetingCall(AutoRecorder recorder, string folder, DateTime startedA
     public ActiveRecording? Audio { get; set; }
     /// <summary>Every window video started, including those already saved.</summary>
     public List<ActiveRecording> Videos { get; } = [];
+    /// <summary>Set once the call's folder is being finished; it then waits for nothing else.</summary>
+    public bool Finishing { get; set; }
     public string NextVideoFile => RecordingSession.NumberedVideoFileName(Videos.Count + 1);
 }

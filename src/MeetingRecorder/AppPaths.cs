@@ -18,6 +18,8 @@ static class AppPaths
 
     public static string MeetingLogPath => Path.Combine(DataDir, "meetings.log");
 
+    public static string AudioLogPath => Path.Combine(DataDir, "audio.log");
+
     /// <summary>Sets <see cref="DataDir"/> from the command line. Returns false when the argument is missing or empty.</summary>
     public static bool TryInitialize(string[] args)
     {

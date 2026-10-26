@@ -2,6 +2,8 @@ namespace MeetingRecorder;
 
 static class Program
 {
+    private const string AudioStatusFlag = "--audio-status";
+
     /// <summary>
     ///  The main entry point for the application.
     /// </summary>
@@ -12,6 +14,17 @@ static class Program
         {
             ApplicationConfiguration.Initialize();
             return RecorderWorker.Run(args);
+        }
+        if (args.Length > 0 && args[0] == RecordingFinisher.Flag)
+            return RecordingFinisher.Run(args);
+        if (args.Length > 0 && args[0] == AudioStatusFlag)
+        {
+            // Diagnostic: every audio device, which apps use it, and which microphone a recording would use now.
+            // Captures nothing and needs no data folder.
+            Console.Out.WriteLine(AudioDevices.Describe());
+            var choice = AudioDevices.ChooseMicrophone(null, null);
+            Console.Out.WriteLine(choice == null ? "microphone none" : $"microphone {choice.DeviceName} ({choice.Reason})");
+            return 0;
         }
         if (args.Length > 0 && args[0] == MeetingLog.StatusFlag)
         {

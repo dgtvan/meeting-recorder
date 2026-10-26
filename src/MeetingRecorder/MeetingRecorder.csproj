@@ -8,6 +8,8 @@
     <!-- For System.Windows.Automation (UIAutomationClient), used only by the meeting status diagnostic. -->
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- VideoSoundMuxer calls Media Foundation through COM vtables. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyTitle>Meeting Recorder</AssemblyTitle>
     <ApplicationManifest>app.manifest</ApplicationManifest>

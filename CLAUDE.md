@@ -21,8 +21,14 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
 ## App specifics
 
 - "Busy" (install/uninstall/deploy refuse with exit 3) = a recording is starting, running or saving.
-  A recording runs in a child process (`MeetingRecorder.exe --record ...`) that saves and exits when its stdin closes.
-- Every mode except `--meeting-status` needs `--data-dir <folder>` (`AppPaths`); the tray passes it to the worker.
+  A recording runs in a child process (`MeetingRecorder.exe --record ...`) that saves and exits when its stdin closes;
+  then a finisher (`--finish <folder> [--auto]`) mixes the sound into the videos, compresses the audio and writes the
+  folder's README.md from the recorders' `*.journal.jsonl` files. Finishing counts as saving.
+- Every mode except `--meeting-status` and `--audio-status` needs `--data-dir <folder>` (`AppPaths`); the tray passes it on.
+- Audio files mean the same in every kind of recording (`RecordingAudio`): system = every app via process loopback,
+  app = the recorded window's program tree, mic = the one in use (`AudioDevices.ChooseMicrophone`), followed.
+  Anything about devices or sources goes to the journal (README.md) and `audio.log`, so a recording can be
+  investigated afterwards.
 - Auto-record is per meeting app: each `IMeetingApp` in `MeetingApps.All` gets an `AutoRecorder` (call detection,
   per-call folder, tidy-up, `meetings.log`). App-specific detection belongs in the `IMeetingApp`, not in the tray.
 - Startup initialization (standard 4.2) is `AppInitializer`; settings migrations go there, keyed on `SchemaVersion`.
@@ -32,7 +38,13 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
 
 - Recording logic can be exercised without the tray: `MeetingRecorder.exe --record --display "\\.\DISPLAY1" --name fullscreen --data-dir <scratch folder>`
   (or `--window <hwnd>`) from `src/MeetingRecorder/bin/`, then write `stop` to stdin. It prints `folder`, `started`,
-  `warning`, `finished`/`failed` lines. Recordings go to the agent account's own Videos folder.
+  `warning`, `log`, `finished`/`failed` lines. Then run `MeetingRecorder.exe --finish <folder> --data-dir <scratch folder>`
+  for the videos' sound and README.md. Recordings go to the `RecordingsRoot` of the scratch folder's settings.json
+  (the account's Videos folder without one). System audio records every app the account plays, and the microphone
+  the room: keep test recordings short and delete them afterwards.
+- Test the app-audio and microphone tracks with sound of your own: `--app-pid <pid>` records that process's tree as
+  `audio-app` on any target; a helper process that plays a tone on a non-default speaker, or opens another
+  microphone, shows that the files follow it. Never use the user's apps for this.
 - Window capture (Windows Graphics Capture) isn't available from the agent account, so `--window` falls back to a
   cropped display capture, which records whatever covers the window, including the user's own work. For performance
   tests use `--record --file <video> --name <n> --data-dir <scratch folder>` instead: it replays a video file through the same encoder settings

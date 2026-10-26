@@ -8,7 +8,7 @@ namespace MeetingRecorder;
 /// </summary>
 sealed class AppSettings
 {
-    /// <summary>Audio device id meaning "follow the Windows default device".</summary>
+    /// <summary>Audio device id meaning "choose automatically".</summary>
     public const string DefaultDevice = "";
 
     /// <summary>Audio device id meaning "don't record this source".</summary>
@@ -26,8 +26,16 @@ sealed class AppSettings
         set => field = string.IsNullOrWhiteSpace(value) ? DefaultRecordingsRoot : Path.GetFullPath(value);
     } = DefaultRecordingsRoot;
 
+    /// <summary>
+    /// <see cref="DisabledDevice"/> turns the system audio (and audio-app) off; anything else records every app's
+    /// sound on any output device. Named after the device it once chose.
+    /// </summary>
     public string SystemAudioDeviceId { get; set; } = DefaultDevice;
 
+    /// <summary>
+    /// The microphone to record: <see cref="DefaultDevice"/> picks the one in use and follows it
+    /// (<see cref="AudioDevices.ChooseMicrophone"/>); a device id records that one while it's connected.
+    /// </summary>
     public string MicrophoneDeviceId { get; set; } = DefaultDevice;
 
     public int VideoFramerate { get; set; } = 15;

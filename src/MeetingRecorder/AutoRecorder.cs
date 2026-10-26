@@ -18,6 +18,12 @@ interface IAutoRecordHost
 
     void StopRecording(ActiveRecording recording);
 
+    /// <summary>
+    /// Finishes the folder of a call whose recordings are all saved (<see cref="RecordingFinisher"/>); calls
+    /// <see cref="AutoRecorder.OnCallFinished"/> once done.
+    /// </summary>
+    void FinishCall(MeetingCall call);
+
     /// <summary>Something the user must act on: logged, and the tray shows a warning until they look at it.</summary>
     void AddProblem(string text);
 
@@ -44,7 +50,6 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
     // A call whose meeting windows are all closed ends after two checks, long enough for Teams to replace the
     // pre-join screen with the meeting window.
     private const int NoWindowChecks = 2;
-    private static readonly TimeSpan MinAutoRecording = TimeSpan.FromSeconds(30);
 
     private readonly MeetingLog _log = new(app);
     // Meeting windows auto-recorded during this call: one that was stopped by hand or failed waits for the next call.
@@ -144,7 +149,9 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
                 return false;
             }
             _log.Append($"Call recording started in {_call.Folder}");
-            host.StartRecording(RecordingTarget.ForAudio($"Call audio: {window.Title}"), _call);
+            // The meeting app's process, for audio-app: the other participants' voices on their own.
+            var meetingApp = ProcessTree.ForWindow(window.Handle);
+            host.StartRecording(RecordingTarget.ForAudio($"{app.DisplayName} call \"{window.Title}\"", meetingApp?.Id), _call);
         }
         _log.Append($"Recording window {window.Handle} \"{window.Title}\" as {_call.NextVideoFile}");
         return host.StartRecording(RecordingTarget.ForWindow(window), _call);
@@ -196,68 +203,25 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
 
     private void FinishCallIfSaved(MeetingCall call)
     {
-        if (call.Ended && !host.Recordings.Any(r => r.Call == call))
-            FinishCall(call);
+        if (call.Ended && !call.Finishing && !host.Recordings.Any(r => r.Call == call))
+        {
+            call.Finishing = true;
+            host.FinishCall(call);
+        }
     }
 
-    /// <summary>
-    /// Tidies up a call's folder once every recording of it is saved. A call shorter than
-    /// <see cref="MinAutoRecording"/> (a pre-join screen, a call left at once) is deleted. Otherwise the videos of
-    /// windows open that briefly (the pre-join screen before the meeting window) are deleted, the rest are numbered in
-    /// order, and the folder is named after the window recorded longest. Deletions are logged without a warning.
-    /// </summary>
-    private void FinishCall(MeetingCall call)
-    {
-        string folder = call.Folder;
-        if (!Directory.Exists(folder))
-            return;
-        string name = Path.GetFileName(folder);
-        // The workers rename their own files; this covers one that was killed or crashed first.
-        if (RecordingSession.FinalizeFiles(folder) is { } renameError)
-            host.AddProblem(renameError);
-        try
-        {
-            TimeSpan Length(ActiveRecording? r) => r?.Process.CapturedFor ?? TimeSpan.Zero;
-            TimeSpan callLength = call.Videos.Select(Length).Append(Length(call.Audio)).Max();
-            if (callLength < MinAutoRecording)
-            {
-                Directory.Delete(folder, recursive: true);
-                WarningLog.Append($"Dropped {app.DisplayName} recording {name}: {callLength.TotalSeconds:0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.");
-                _log.Append($"Call recording dropped: {callLength.TotalSeconds:0} s.");
-                return;
-            }
+    /// <summary>A line from the finisher of one of this app's calls, for meetings.log.</summary>
+    public void LogFinishing(string text) => _log.Append(text);
 
-            var kept = new List<ActiveRecording>();
-            foreach (var video in call.Videos.Where(v => File.Exists(Path.Combine(folder, v.VideoFile))))
-            {
-                if (Length(video) >= MinAutoRecording)
-                {
-                    kept.Add(video);
-                    continue;
-                }
-                File.Delete(Path.Combine(folder, video.VideoFile));
-                string dropped = $"Dropped {video.VideoFile} ({video.Target.Name}) from {app.DisplayName} recording {name}: "
-                    + $"{Length(video).TotalSeconds:0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.";
-                WarningLog.Append(dropped);
-                _log.Append(dropped);
-            }
-            // Each file moves to the same or a lower number, which is free by then.
-            for (int i = 0; i < kept.Count; i++)
-            {
-                string numbered = RecordingSession.NumberedVideoFileName(i + 1);
-                if (numbered == kept[i].VideoFile)
-                    continue;
-                File.Move(Path.Combine(folder, kept[i].VideoFile), Path.Combine(folder, numbered));
-                _log.Append($"Renamed {kept[i].VideoFile} to {numbered}.");
-            }
-            if (kept.MaxBy(Length) is { } main)
-                folder = RecordingSession.RenameFolder(folder, call.StartedAt, main.Target.Name);
-            _log.Append($"Call recording saved in {folder}");
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    /// <summary>A call's folder is finished (<paramref name="folder"/> is its final path), or finishing failed.</summary>
+    public void OnCallFinished(MeetingCall call, string folder, string? error)
+    {
+        if (error != null)
         {
-            host.AddProblem($"Could not tidy up the {app.DisplayName} recording {name}: {ex.Message}");
+            host.AddProblem($"Could not finish the {app.DisplayName} recording {Path.GetFileName(call.Folder)}: {error}");
+            return;
         }
-        host.OnCallSaved(folder);
+        if (Directory.Exists(folder))
+            host.OnCallSaved(folder);
     }
 }

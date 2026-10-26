@@ -21,6 +21,10 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
     private const long LowDiskSpaceBytes = 2L << 30;
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan SaveTimeout = TimeSpan.FromMinutes(2);
+    // Mixing the sound into the videos and compressing three audio files takes about 5 s per recorded minute.
+    private static readonly TimeSpan FinishTimePerMinute = TimeSpan.FromSeconds(15);
+    // A folder touched more recently than this may still be written by a recorder of an app that was killed.
+    private static readonly TimeSpan UnfinishedQuietTime = TimeSpan.FromMinutes(2);
 
     private readonly AppSettings _settings;
     private readonly NotifyIcon _tray;
@@ -44,6 +48,9 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
     private readonly EventWaitHandle _exitRefused = new(false, EventResetMode.AutoReset, @"Local\MeetingRecorder-ExitRefused");
     private readonly SynchronizationContext _ui;
     private readonly List<ActiveRecording> _recordings = [];
+    private readonly AudioDeviceWatcher? _deviceWatcher;
+    // What to say when a recording started by hand is saved, e.g. that its window was closed; kept while it is finished.
+    private readonly Dictionary<ActiveRecording, string?> _finishNotes = [];
     private bool _lowDiskReported;
     private string? _lastFolder;
     private bool _exitAfterStop;
@@ -158,9 +165,21 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
         };
         Application.ThreadException += (_, e) => AddProblem($"Unexpected error: {e.Exception.Message}");
 
+        try
+        {
+            AudioLog($"Meeting Recorder started. Audio devices:\n{AudioDevices.Describe()}");
+            _deviceWatcher = new AudioDeviceWatcher();
+            _deviceWatcher.Changed += AudioLog;
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        {
+            AudioLog($"Audio devices can't be watched: {ex.Message}");
+        }
+
         RefreshState();
         foreach (string problem in dataProblems)
             AddProblem(problem);
+        FinishUnfinishedFolders();
 
         new Thread(() =>
         {
@@ -275,9 +294,10 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
             CheckDiskSpace();
     }
 
-    /// <summary>Converting the audio after stop takes about a second per minute recorded, so long recordings get longer.</summary>
-    private static TimeSpan SaveLimit(ActiveRecording recording) =>
-        SaveTimeout + TimeSpan.FromSeconds(Math.Max(0, (recording.PhaseSince.ToLocalTime() - recording.Process.StartedAt).TotalMinutes) * 5);
+    /// <summary>Saving and finishing take longer the longer the recording is.</summary>
+    private static TimeSpan SaveLimit(ActiveRecording recording) => recording.IsFinishing
+        ? SaveTimeout + FinishTimePerMinute * recording.RecordedFor.TotalMinutes
+        : SaveTimeout + TimeSpan.FromSeconds(Math.Max(0, (recording.PhaseSince.ToLocalTime() - recording.Process.StartedAt).TotalMinutes) * 5);
 
     private void CheckDiskSpace()
     {
@@ -403,15 +423,18 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
             items.Add(new ToolStripMenuItem(label, null, (_, _) => SaveDevice(setId, id)) { Checked = current == id });
 
         Add("Off", AppSettings.DisabledDevice);
+        if (flow == DataFlow.Render)
+        {
+            // Every app's sound is recorded whatever device it plays on, so there is no device to choose.
+            Add("Every app, on any speaker or headset", AppSettings.DefaultDevice);
+            return;
+        }
         try
         {
-            using var enumerator = new MMDeviceEnumerator();
-            string defaultName = enumerator.TryGetDefaultAudioEndpoint(flow, Role.Console, out var defaultDevice)
-                ? defaultDevice!.FriendlyName
-                : "none";
-            defaultDevice?.Dispose();
-            Add($"Windows default ({defaultName})", AppSettings.DefaultDevice);
+            string now = AudioDevices.ChooseMicrophone(null, null)?.DeviceName ?? "none connected";
+            Add($"Automatic: the one in use (now {now})", AppSettings.DefaultDevice);
             items.Add(new ToolStripSeparator());
+            using var enumerator = new MMDeviceEnumerator();
             foreach (var device in enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active))
             {
                 using (device)
@@ -506,6 +529,7 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
                 RefreshState();
             };
             process.Warning += (_, text) => AddProblem(text);
+            process.Log += (_, text) => AudioLog($"[{target.Name}] {text}");
             process.Stopping += _ =>
             {
                 if (!added.IsCapturing)
@@ -566,6 +590,12 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
         RecordingProcess session = recording.Process;
         _recordings.Remove(recording);
         RefreshState();
+        if (recording.IsFinishing)
+        {
+            OnFinished(recording, error);
+            ExitIfDone();
+            return;
+        }
         if (recording.Call is { } call)
         {
             call.Recorder.OnRecordingFinished(recording, error);
@@ -573,24 +603,99 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
             return;
         }
 
-        _lastFolder = session.FolderPath ?? _lastFolder;
-        // The worker renames its files itself; this covers a worker that was killed or crashed first.
-        if (session.FolderPath != null && Directory.Exists(session.FolderPath)
-            && RecordingSession.FinalizeFiles(session.FolderPath) is { } renameError)
-            AddProblem(renameError);
-
-        if (_exitAfterStop)
-        {
-            ExitIfDone();
-            return;
-        }
-
         if (error != null)
             AddProblem($"Recording failed: {error}");
-        else if (_problems.Count == 0)
-            ShowBalloon("Recording saved",
-                Join(session.EndNote ?? "", "Click to open " + Path.GetFileName(session.FolderPath ?? "")), ToolTipIcon.Info);
+        // Whatever was saved, even of a failed recording, gets its sound and README.md.
+        if (session.FolderPath != null && Directory.Exists(session.FolderPath))
+            StartFinishing(session.FolderPath, auto: false, null, session.CapturedFor ?? TimeSpan.Zero, session.EndNote);
+        ExitIfDone();
     }
+
+    /// <summary>
+    /// Finishes a recording folder in a <see cref="RecordingFinisher"/> process, shown as saving until it is done. Runs
+    /// while the app is exiting too, so nothing is left half done.
+    /// </summary>
+    private void StartFinishing(string folder, bool auto, MeetingCall? call, TimeSpan recordedFor, string? endNote = null)
+    {
+        var process = RecordingProcess.ForFinishing(_ui, folder, auto);
+        var finishing = new ActiveRecording(process, new RecordingTarget(Path.GetFileName(folder), IntPtr.Zero, null), call, "")
+        {
+            IsFinishing = true,
+            RecordedFor = recordedFor,
+        };
+        finishing.Enter(RecordingPhase.Saving);
+        process.Warning += (_, text) => AddProblem(text);
+        process.Log += (_, text) => call?.Recorder.LogFinishing(text);
+        process.Dropped += (_, text) =>
+        {
+            WarningLog.Append(text);
+            call?.Recorder.LogFinishing(text);
+        };
+        process.Finished += (_, error) => OnRecordingFinished(finishing, error);
+        _finishNotes[finishing] = endNote;
+        _recordings.Add(finishing);
+        RefreshState();
+        try
+        {
+            process.Start();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            _recordings.Remove(finishing);
+            RefreshState();
+            AddProblem($"Could not finish saving {Path.GetFileName(folder)}: {ex.Message}");
+        }
+    }
+
+    private void OnFinished(ActiveRecording finishing, string? error)
+    {
+        _finishNotes.Remove(finishing, out string? endNote);
+        string folder = finishing.Process.FolderPath ?? "";
+        if (finishing.Call is { } call)
+        {
+            call.Recorder.OnCallFinished(call, folder, error);
+            return;
+        }
+        if (error != null)
+        {
+            AddProblem($"Could not finish saving {Path.GetFileName(folder)}: {error}");
+            return;
+        }
+        if (!Directory.Exists(folder))
+            return;
+        _lastFolder = folder;
+        if (!_exitAfterStop && _problems.Count == 0)
+            ShowBalloon("Recording saved", Join(endNote ?? "", "Click to open " + Path.GetFileName(folder)), ToolTipIcon.Info);
+    }
+
+    /// <summary>
+    /// Finishes the recordings left unfinished by an earlier run that was killed or crashed: folders in the recordings
+    /// folder that still hold journals and haven't been written to for a while.
+    /// </summary>
+    private void FinishUnfinishedFolders()
+    {
+        try
+        {
+            if (!Directory.Exists(_settings.RecordingsRoot))
+                return;
+            foreach (var folder in new DirectoryInfo(_settings.RecordingsRoot).EnumerateDirectories())
+            {
+                var journals = RecordingJournal.Paths(folder.FullName).ToList();
+                if (journals.Count == 0 || folder.EnumerateFiles().Any(f => DateTime.UtcNow - f.LastWriteTimeUtc < UnfinishedQuietTime))
+                    continue;
+                bool auto = RecordingJournal.ReadAll(folder.FullName).Any(e => e.Kind == JournalEntry.Recording && e.Auto == true);
+                AudioLog($"Finishing {folder.Name}, left unfinished by an earlier run.");
+                StartFinishing(folder.FullName, auto, null, TimeSpan.FromHours(2));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AudioLog($"Could not look for unfinished recordings: {ex.Message}");
+        }
+    }
+
+    /// <summary>Appends to audio.log: devices, which sources each recording uses, switches and device changes.</summary>
+    private static void AudioLog(string text) => LogFile.Append(AppPaths.AudioLogPath, text.Replace(" | ", "\n    "), multiline: true);
 
     IReadOnlyCollection<ActiveRecording> IAutoRecordHost.Recordings => _recordings;
 
@@ -601,6 +706,15 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
     bool IAutoRecordHost.StartRecording(RecordingTarget target, MeetingCall call) => StartRecording(target, call);
 
     void IAutoRecordHost.StopRecording(ActiveRecording recording) => StopRecording(recording);
+
+    void IAutoRecordHost.FinishCall(MeetingCall call)
+    {
+        if (!Directory.Exists(call.Folder))
+            return;
+        TimeSpan length = call.Videos.Append(call.Audio).OfType<ActiveRecording>()
+            .Select(r => r.Process.CapturedFor ?? TimeSpan.Zero).DefaultIfEmpty().Max();
+        StartFinishing(call.Folder, auto: true, call, length);
+    }
 
     void IAutoRecordHost.AddProblem(string text) => AddProblem(text);
 
@@ -647,6 +761,7 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
 
     private void ExitNow()
     {
+        _deviceWatcher?.Dispose();
         _watchdog.Dispose();
         _animation.Dispose();
         _autoRecordTimer.Dispose();
