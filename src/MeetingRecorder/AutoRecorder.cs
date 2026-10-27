@@ -182,7 +182,7 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
     /// <summary>
     /// Called when a recording of one of this app's calls has exited. A window that failed before its first frame while
     /// another window of the call is recorded is only logged: Teams opens windows with the meeting's title that can't
-    /// be captured.
+    /// be captured. So is one whose window closed before the recording started.
     /// </summary>
     public void OnRecordingFinished(ActiveRecording recording, string? error)
     {
@@ -192,13 +192,31 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
             + (error != null ? $", failed: {error}" : "."));
         if (error != null)
         {
-            if (!recording.IsAudio && recording.Process.CapturedFor == null
-                && call.Videos.Any(v => v != recording && v.Process.CapturedFor != null))
+            bool neverStarted = !recording.IsAudio && recording.Process.CapturedFor == null;
+            if (neverStarted && call.Videos.Any(v => v != recording && v.Process.CapturedFor != null))
                 WarningLog.Append($"{app.DisplayName} window not recorded ({recording.Target.Name}), the call's other windows are: {error}");
+            else if (neverStarted && !IsMeetingWindowOpen(recording.Target.WindowHandle))
+                _log.Append($"Window {recording.Target.WindowHandle} closed before its recording started; nothing to record.");
             else
                 host.AddProblem($"Recording failed: {error}");
         }
         FinishCallIfSaved(call);
+    }
+
+    /// <summary>
+    /// False when the window is gone or no longer a meeting window: Teams closes or hides a meeting window that has
+    /// just opened when the user leaves or rejoins, and a recording started on it in that moment fails.
+    /// </summary>
+    private bool IsMeetingWindowOpen(IntPtr handle)
+    {
+        try
+        {
+            return WindowList.IsAlive(handle) && app.FindMeetingWindows(onScreenOnly: false).Any(w => w.Handle == handle);
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        {
+            return true;
+        }
     }
 
     private void FinishCallIfSaved(MeetingCall call)
