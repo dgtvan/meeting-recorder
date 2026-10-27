@@ -58,7 +58,8 @@ starts with none, and the log keeps the earlier ones.
 
 It's raised when:
 - a recording fails to start, stops by itself, or the recorder crashes or hangs (30 s to start; 2 min plus 5 s per
-  recorded minute to save);
+  recorded minute to save); a meeting window that fails in an auto-recorded call's first 30 s is raised only once the
+  call lasts longer, since Teams briefly shows a call's window again just after it ends;
 - an auto-recorded call has only one side: the microphone has sound but the system audio is (nearly) silent, so the
   other participants are missing (README.md says so too);
 - system audio or the microphone can't be recorded (system audio is retried every 2 s), or the

@@ -49,4 +49,10 @@ sealed class MeetingCall(AutoRecorder recorder, string folder, DateTime startedA
     /// <summary>Set once the call's folder is being finished; it then waits for nothing else.</summary>
     public bool Finishing { get; set; }
     public string NextVideoFile => RecordingSession.NumberedVideoFileName(Videos.Count + 1);
+    /// <summary>
+    /// Problems of a call too young to tell from a window Teams shows briefly as a call ends: raised once the call lasts
+    /// <see cref="RecordingFinisher.MinAutoRecording"/> or is kept, only logged when it is dropped as too short.
+    /// </summary>
+    public List<string> HeldProblems { get; } = [];
+    public bool IsYoung => DateTime.Now - StartedAt < RecordingFinisher.MinAutoRecording;
 }

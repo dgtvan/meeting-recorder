@@ -67,6 +67,8 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
 
     public void Check()
     {
+        if (_call is { IsYoung: false, HeldProblems.Count: > 0 } lasting)
+            RaiseHeldProblems(lasting);
         // Meeting apps close the meeting window the moment the call ends, so this is the quickest end signal. Teams
         // also replaces the window mid-call (the pre-join screen, which already holds the microphone, becomes the
         // meeting window on Join); the new window is recorded below like any other, and the call's audio carries on.
@@ -197,6 +199,12 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
                 WarningLog.Append($"{app.DisplayName} window not recorded ({recording.Target.Name}), the call's other windows are: {error}");
             else if (neverStarted && !IsMeetingWindowOpen(recording.Target.WindowHandle))
                 _log.Append($"Window {recording.Target.WindowHandle} closed before its recording started; nothing to record.");
+            else if (neverStarted && call.IsYoung)
+            {
+                // After a call ends Teams can still show its window for a moment, too briefly to record.
+                call.HeldProblems.Add($"Recording failed: {error}");
+                _log.Append("Problem held until the call proves longer than a moment.");
+            }
             else
                 host.AddProblem($"Recording failed: {error}");
         }
@@ -228,12 +236,26 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
         }
     }
 
+    private void RaiseHeldProblems(MeetingCall call)
+    {
+        foreach (string problem in call.HeldProblems)
+            host.AddProblem(problem);
+        call.HeldProblems.Clear();
+    }
+
     /// <summary>A line from the finisher of one of this app's calls, for meetings.log.</summary>
     public void LogFinishing(string text) => _log.Append(text);
 
     /// <summary>A call's folder is finished (<paramref name="folder"/> is its final path), or finishing failed.</summary>
     public void OnCallFinished(MeetingCall call, string folder, string? error)
     {
+        if (error == null && !Directory.Exists(folder))
+        {
+            foreach (string problem in call.HeldProblems)
+                _log.Append($"Not raised, the call was dropped as too short: {problem}");
+            call.HeldProblems.Clear();
+        }
+        RaiseHeldProblems(call);
         if (error != null)
         {
             host.AddProblem($"Could not finish the {app.DisplayName} recording {Path.GetFileName(call.Folder)}: {error}");
