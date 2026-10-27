@@ -12,7 +12,7 @@ sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayD
     public bool IsAudioOnly { get; init; }
 
     /// <summary>
-    /// The program whose sound goes to audio-app: the meeting app of a call's audio. For a window it is found from the
+    /// The program whose microphone is recorded: the meeting app of a call's audio. For a window it is found from the
     /// window when not set; a display has none.
     /// </summary>
     public uint? AppProcessId { get; init; }
@@ -112,7 +112,7 @@ sealed class RecordingSession
     private IEnumerable<string> OwnFileNames =>
         (_target.IsAudioOnly ? [] : (string[])[_output.VideoFileName]).Concat(_audio?.FileNamesUsed ?? []);
 
-    /// <summary>The program behind what is recorded, whose sound goes to audio-app; null for a display.</summary>
+    /// <summary>The program behind what is recorded, whose microphone is recorded; null for a display.</summary>
     private AppProcess? App { get; set; }
 
     public void Start()
@@ -319,16 +319,16 @@ sealed class RecordingSession
             _audio = new RecordingAudio(_ui, _settings, FolderPath, App, _journal);
             _audio.Warning += text => Warning?.Invoke(text);
             _audio.Log += text => Log?.Invoke(text);
-            _ = StartAudio(_audio);
+            StartAudio(_audio);
         }
         Started?.Invoke(this);
     }
 
-    private async Task StartAudio(RecordingAudio audio)
+    private void StartAudio(RecordingAudio audio)
     {
         try
         {
-            await audio.StartAsync();
+            audio.Start();
         }
         catch (Exception ex)
         {

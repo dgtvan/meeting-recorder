@@ -37,10 +37,10 @@ sealed class AudioTrack
     private long? _stopTicks;
     private bool _closed;
 
-    /// <summary>"system", "app" or "mic": which track of the recording this is.</summary>
+    /// <summary>"system" or "mic": which track of the recording this is.</summary>
     public string Kind { get; }
 
-    /// <summary>"System audio", "App audio" or "Microphone", for messages.</summary>
+    /// <summary>"System audio" or "Microphone", for messages.</summary>
     public string Label { get; }
 
     public string FileName { get; }
@@ -71,20 +71,13 @@ sealed class AudioTrack
         .WithFormat(Format(_channels))
         .Build();
 
-    /// <summary>
-    /// Opens the sound of one process and its children (<see cref="ProcessLoopbackMode.IncludeTargetProcessTree"/>), or of
-    /// every process except them, whatever speaker or headset they play on.
-    /// </summary>
-    public Task<WasapiRecorder> OpenProcessLoopbackAsync(uint processId, ProcessLoopbackMode mode)
-    {
-        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
-            throw new PlatformNotSupportedException("recording an app's sound needs Windows 10 version 2004 or later");
-        return new WasapiRecorderBuilder()
-            .WithProcessLoopback(processId, mode)
-            .WithBufferLength(BufferMilliseconds)
-            .WithFormat(Format(_channels))
-            .BuildAsync();
-    }
+    /// <summary>Opens everything an output device plays (loopback) in this track's format.</summary>
+    public WasapiRecorder OpenLoopback(MMDevice device) => new WasapiRecorderBuilder()
+        .WithDevice(device)
+        .WithBufferLength(BufferMilliseconds)
+        .WithFormat(Format(_channels))
+        .WithLoopbackCapture()
+        .Build();
 
     /// <summary>Sets the time the file starts at, on the <see cref="RecordingJournal.Now"/> clock. Call once, before the first source.</summary>
     public void Start(long ticks) => _startTicks = ticks;
@@ -275,7 +268,7 @@ sealed class AudioTrack
 
         /// <summary>
         /// Disposes the capture on another thread: disposing waits for its capture thread, which may be the thread
-        /// running this (a process loopback capture raises its stopped event there).
+        /// running this (a capture can raise its stopped event there).
         /// </summary>
         public void Dispose() => Task.Run(Capture.Dispose);
 

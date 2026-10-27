@@ -5,12 +5,10 @@ namespace MeetingRecorder;
 /// <summary>
 /// The separate audio files of one recording, the same in every kind of recording:
 /// <list type="bullet">
-/// <item>audio-system.wav: every app's sound, whatever speaker or headset it plays on (process loopback of every
-/// process but this recorder), so a device change can't lose it;</item>
-/// <item>audio-app.wav: only the sound of the program that owns the recorded window and every process it started, when
-/// there is such a program (not for a display). Windows records a process with its direct children only, so the
-/// processes playing deeper down get a part file each (audio-app-2.wav, ...), found every few seconds, which
-/// <see cref="RecordingFinisher"/> mixes into audio-app;</item>
+/// <item>audio-system.wav: every app's sound, whatever speaker or headset it plays on: each active output device is
+/// recorded (device loopback) into a part file of its own (audio-system.wav, audio-system-2.wav, ...), devices that
+/// appear later are found every few seconds, and <see cref="RecordingFinisher"/> mixes the parts into audio-system.
+/// Process loopback isn't used: measured during a Teams call, it records none of the call's sound;</item>
 /// <item>audio-mic.wav: the microphone in use (<see cref="AudioDevices.ChooseMicrophone"/>), followed when it changes,
 /// unless one is chosen in the menu.</item>
 /// </list>
@@ -20,10 +18,8 @@ namespace MeetingRecorder;
 sealed class RecordingAudio
 {
     public const string SystemFileName = "audio-system.wav";
-    public const string AppFileName = "audio-app.wav";
     public const string MicrophoneFileName = "audio-mic.wav";
-    public static readonly string[] FileNames = [SystemFileName, AppFileName, MicrophoneFileName];
-    private const int MaxAppParts = 8;
+    private const int MaxSystemParts = 8;
 
     private const int CheckMilliseconds = 2000;
 
@@ -35,10 +31,8 @@ sealed class RecordingAudio
     private readonly List<AudioTrack> _tracks = [];
     private readonly List<MMDevice> _devices = [];
     private readonly HashSet<AudioTrack> _reopening = [];
-    private readonly HashSet<AudioTrack> _opening = [];
-    // What each loopback track records: the process, include or exclude its tree, and the description.
-    private readonly Dictionary<AudioTrack, (uint Pid, ProcessLoopbackMode Mode, string Source)> _loopbacks = [];
-    private readonly List<uint> _appRoots = [];
+    // The output device each system audio part records, and its name.
+    private readonly Dictionary<AudioTrack, (string DeviceId, string Name)> _loopbacks = [];
     private long _start;
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = CheckMilliseconds };
     private AudioDeviceWatcher? _watcher;
@@ -66,7 +60,7 @@ sealed class RecordingAudio
         _journal = journal;
     }
 
-    public async Task StartAsync()
+    public void Start()
     {
         try
         {
@@ -88,13 +82,9 @@ sealed class RecordingAudio
         var loopbacks = new List<AudioTrack>();
         if (_settings.SystemAudioDeviceId != AppSettings.DisabledDevice)
         {
-            var system = new AudioTrack("system", "System audio", _folder, SystemFileName, 2);
-            _loopbacks[system] = ((uint)Environment.ProcessId, ProcessLoopbackMode.ExcludeTargetProcessTree, "every app, on any output device");
-            loopbacks.Add(system);
-            if (_app != null)
-                loopbacks.AddRange(NewAppParts());
-            else
-                Log?.Invoke("App audio: not recorded, no single program owns what is recorded.");
+            loopbacks.AddRange(NewSystemParts());
+            if (loopbacks.Count == 0)
+                Warning?.Invoke("System audio is not being recorded: no output device is active. It is recorded once one is.");
         }
         if (_settings.MicrophoneDeviceId != AppSettings.DisabledDevice)
             _microphone = new AudioTrack("mic", "Microphone", _folder, MicrophoneFileName, 1);
@@ -105,10 +95,8 @@ sealed class RecordingAudio
             AddTrack(track);
         foreach (var track in loopbacks)
         {
-            Record(track, JournalEntry.TrackStart, _loopbacks[track].Source, _start);
-            await OpenLoopback(track);
-            if (_stopping)
-                return;
+            Record(track, JournalEntry.TrackStart, SystemSource(track), _start);
+            OpenLoopback(track);
         }
         if (_microphone != null)
             StartMicrophone(_start);
@@ -123,84 +111,78 @@ sealed class RecordingAudio
         _tracks.Add(track);
     }
 
-    /// <summary>
-    /// App audio part files for the processes of the app that play sound and aren't recorded yet; the first is the app
-    /// itself (audio-app.wav).
-    /// </summary>
-    private List<AudioTrack> NewAppParts()
+    /// <summary>System audio part files for the active output devices that aren't recorded yet; the first is audio-system.wav.</summary>
+    private List<AudioTrack> NewSystemParts()
     {
         var parts = new List<AudioTrack>();
-        List<uint> roots;
+        List<(string Id, string Name)> devices;
         try
         {
-            roots = ProcessTree.LoopbackRoots(_app!.Id, AudioDevices.PlayingProcesses(), ProcessTree.Parents());
+            devices = AudioDevices.ActiveOutputs();
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException)
         {
             // Devices can be mid-change; the next check decides.
-            roots = _appRoots.Count == 0 ? [_app!.Id] : [];
+            return parts;
         }
-        foreach (uint root in roots.Where(r => !_appRoots.Contains(r)))
+        foreach (var (id, name) in devices.Where(d => !_loopbacks.Values.Any(l => l.DeviceId == d.Id)))
         {
-            if (_appRoots.Count >= MaxAppParts)
+            if (_loopbacks.Count >= MaxSystemParts)
                 break;
-            string file = _appRoots.Count == 0 ? AppFileName : $"{Path.GetFileNameWithoutExtension(AppFileName)}-{_appRoots.Count + 1}.wav";
-            var process = ProcessTree.Describe(root);
-            string source = _appRoots.Count == 0
-                ? $"only {_app} and the processes it started, on any output device"
-                : $"{process?.ToString() ?? $"pid {root}"}, a process of {_app} that plays sound, and its child processes (a part of audio-app)";
-            _appRoots.Add(root);
-            var track = new AudioTrack("app", "App audio", _folder, file, 2);
-            _loopbacks[track] = (root, ProcessLoopbackMode.IncludeTargetProcessTree, source);
+            string file = _loopbacks.Count == 0 ? SystemFileName : $"{Path.GetFileNameWithoutExtension(SystemFileName)}-{_loopbacks.Count + 1}.wav";
+            var track = new AudioTrack("system", "System audio", _folder, file, 2);
+            _loopbacks[track] = (id, name);
             parts.Add(track);
         }
         return parts;
     }
 
-    /// <summary>Starts recording the app's processes that started playing sound since the last check.</summary>
-    private async Task AddAppParts()
+    private string SystemSource(AudioTrack track)
     {
-        foreach (var track in NewAppParts())
+        string name = _loopbacks[track].Name;
+        return track.FileName == SystemFileName
+            ? $"everything played on {name}"
+            : $"everything played on {name}, another output device (a part of audio-system)";
+    }
+
+    /// <summary>Starts recording the output devices that became active since the last check.</summary>
+    private void AddSystemParts()
+    {
+        foreach (var track in NewSystemParts())
         {
-            if (_stopping)
-                return;
             AddTrack(track);
-            Record(track, JournalEntry.TrackStart, _loopbacks[track].Source);
-            await OpenLoopback(track);
-            if (_stopping)
-                return;
+            Record(track, JournalEntry.TrackStart, SystemSource(track));
+            OpenLoopback(track);
         }
     }
 
-    /// <summary>Opens a loopback track's process capture; on failure it is retried on each check.</summary>
-    private async Task OpenLoopback(AudioTrack track)
+    /// <summary>
+    /// Opens a system audio part's device loopback. A device that isn't active (unplugged) is retried on each check
+    /// without a warning: devices come and go, and the other parts record what plays meanwhile.
+    /// </summary>
+    private void OpenLoopback(AudioTrack track)
     {
-        if (!_opening.Add(track))
-            return;
-        (uint pid, ProcessLoopbackMode mode, string source) = _loopbacks[track];
+        (string id, string name) = _loopbacks[track];
         try
         {
-            var capture = await track.OpenProcessLoopbackAsync(pid, mode);
-            if (_stopping)
+            using var enumerator = new MMDeviceEnumerator();
+            if (AudioDevices.Active(enumerator, id) is not { } device)
             {
-                capture.Dispose();
+                _reopening.Add(track);
                 return;
             }
-            track.Use(capture, source);
+            _devices.Add(device);
+            track.Use(track.OpenLoopback(device), $"everything played on {name}");
             if (_reopening.Remove(track))
-                Record(track, JournalEntry.TrackSource, source + " (recording again)");
+                Record(track, JournalEntry.TrackSource, $"everything played on {name} (recording again)");
         }
         catch (Exception ex)
         {
             if (_reopening.Add(track))
             {
-                Record(track, JournalEntry.Event, $"{track.Label} can't be recorded: {ex.Message}. Retrying every {CheckMilliseconds / 1000} s.");
-                Warning?.Invoke($"{track.Label} is not being recorded: {ex.Message}");
+                Record(track, JournalEntry.Event, $"{track.Label} on {name} can't be recorded: {ex.Message}. Retrying every {CheckMilliseconds / 1000} s.");
+                Warning?.Invoke($"{track.Label} on {name} is not being recorded: {ex.Message}");
             }
-        }
-        finally
-        {
-            _opening.Remove(track);
         }
     }
 
@@ -241,8 +223,8 @@ sealed class RecordingAudio
         }
         else
         {
+            // An output device unplugged: recorded again if it comes back.
             _reopening.Add(track);
-            Warning?.Invoke($"{track.Label} stopped recording: {error.Message}. Retrying.");
         }
     }
 
@@ -251,9 +233,9 @@ sealed class RecordingAudio
         if (_stopping)
             return;
         foreach (var track in _reopening.ToList())
-            _ = OpenLoopback(track);
-        if (_app != null && _loopbacks.Count > 0)
-            _ = AddAppParts();
+            OpenLoopback(track);
+        if (_settings.SystemAudioDeviceId != AppSettings.DisabledDevice)
+            AddSystemParts();
         if (_followMicrophone)
             CheckMicrophone(sourceLost: _microphoneId == null);
     }

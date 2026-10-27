@@ -149,7 +149,7 @@ sealed class AutoRecorder(IMeetingApp app, IAutoRecordHost host)
                 return false;
             }
             _log.Append($"Call recording started in {_call.Folder}");
-            // The meeting app's process, for audio-app: the other participants' voices on their own.
+            // The meeting app's process, whose microphone is the one to record.
             var meetingApp = ProcessTree.ForWindow(window.Handle);
             host.StartRecording(RecordingTarget.ForAudio($"{app.DisplayName} call \"{window.Title}\"", meetingApp?.Id), _call);
         }

@@ -27,7 +27,7 @@ sealed class AppSettings
     } = DefaultRecordingsRoot;
 
     /// <summary>
-    /// <see cref="DisabledDevice"/> turns the system audio (and audio-app) off; anything else records every app's
+    /// <see cref="DisabledDevice"/> turns the system audio off; anything else records every app's
     /// sound on any output device. Named after the device it once chose.
     /// </summary>
     public string SystemAudioDeviceId { get; set; } = DefaultDevice;

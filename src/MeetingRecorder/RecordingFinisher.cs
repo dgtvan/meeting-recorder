@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using NAudio.Wave;
 
 namespace MeetingRecorder;
@@ -8,7 +10,8 @@ namespace MeetingRecorder;
 /// Finishes a recording folder once every recorder writing to it has exited
 /// (<c>MeetingRecorder.exe --finish &lt;folder&gt; [--auto] --data-dir ...</c>): reads the recorders' journals, drops
 /// what an auto-recorded call doesn't keep, mixes the system audio and microphone into each video, compresses the
-/// audio, writes README.md describing every file, and deletes the journals.
+/// audio, writes README.md describing every file (and the same facts as recording.json, for programs), and deletes the
+/// journals.
 /// </summary>
 /// <remarks>
 /// Runs in a process of its own, like a recording, so the tray stays small. It answers on stdout, one line per message:
@@ -20,6 +23,14 @@ static class RecordingFinisher
 {
     public const string Flag = "--finish";
     public const string ReadmeFileName = "README.md";
+    public const string ManifestFileName = "recording.json";
+
+    /// <summary>
+    /// A call whose microphone has at least this much sound while the system audio has less than
+    /// <see cref="OneSidedSystemSeconds"/> recorded only one side: the other participants are missing.
+    /// </summary>
+    private const double OneSidedMicSeconds = 30;
+    private const double OneSidedSystemSeconds = 5;
 
     /// <summary>An auto-recorded call, or a video of one, shorter than this is deleted: a pre-join screen, a call left at once.</summary>
     public static readonly TimeSpan MinAutoRecording = TimeSpan.FromSeconds(30);
@@ -89,7 +100,7 @@ static class RecordingFinisher
         public long? End { get; set; }
         public JournalEntry? Stats { get; set; }
         public List<JournalEntry> Sources { get; } = [];
-        /// <summary>Part files mixed into this one (app audio of processes deeper in the app's tree).</summary>
+        /// <summary>Part files mixed into this one (system audio of further output devices).</summary>
         public List<string> Parts { get; } = [];
         public TimeSpan Length => TimeSpan.FromTicks((End ?? Start) - Start);
     }
@@ -114,6 +125,9 @@ static class RecordingFinisher
         long lastSeen = entries.Count > 0 ? entries.Max(e => e.Qpc) : 0;
         var videos = new List<Video>();
         var tracks = new List<Track>();
+        // Part files share a kind, so an entry belongs to the track of its file.
+        Track? TrackOf(JournalEntry entry) =>
+            tracks.LastOrDefault(t => t.File == entry.File) ?? tracks.LastOrDefault(t => t.Kind == entry.Track);
         foreach (var entry in entries)
         {
             switch (entry.Kind)
@@ -130,10 +144,10 @@ static class RecordingFinisher
                     track.Sources.Add(entry);
                     tracks.Add(track);
                     break;
-                case JournalEntry.TrackSource when tracks.LastOrDefault(t => t.Kind == entry.Track) is { } changed:
+                case JournalEntry.TrackSource when TrackOf(entry) is { } changed:
                     changed.Sources.Add(entry);
                     break;
-                case JournalEntry.TrackEnd when tracks.LastOrDefault(t => t.Kind == entry.Track) is { } stopped:
+                case JournalEntry.TrackEnd when TrackOf(entry) is { } stopped:
                     stopped.End = entry.Qpc;
                     stopped.Stats = entry;
                     break;
@@ -162,10 +176,17 @@ static class RecordingFinisher
             DropShortVideos(folder, videos, notes, dropped, report);
         }
 
-        MergeAppParts(folder, tracks, report);
+        foreach (string kind in tracks.Select(t => t.Kind).Distinct().ToList())
+            MergeParts(folder, tracks, kind, report);
         var recording = entries.FirstOrDefault(e => e.Kind == JournalEntry.Recording);
         var system = tracks.FirstOrDefault(t => t.Kind == "system");
         var microphone = tracks.FirstOrDefault(t => t.Kind == "mic");
+        if (OneSided(system, microphone) is { } oneSided)
+        {
+            notes.Add(oneSided);
+            if (auto)
+                report("warning", $"{Path.GetFileName(folder)}: {oneSided}");
+        }
         if (system != null || microphone != null)
         {
             foreach (var video in videos)
@@ -188,10 +209,11 @@ static class RecordingFinisher
             try
             {
                 File.WriteAllText(Path.Combine(folder, ReadmeFileName), Readme(folder, recording, videos, tracks, entries, notes, dropped, settings));
+                File.WriteAllText(Path.Combine(folder, ManifestFileName), Manifest(recording, videos, tracks, entries, notes));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                report("warning", $"Could not write {ReadmeFileName} in {Path.GetFileName(folder)}: {ex.Message}");
+                report("warning", $"Could not write {ReadmeFileName} or {ManifestFileName} in {Path.GetFileName(folder)}: {ex.Message}");
             }
         }
         foreach (string journal in RecordingJournal.Paths(folder).ToList())
@@ -250,15 +272,15 @@ static class RecordingFinisher
     }
 
     /// <summary>
-    /// Mixes the app audio part files (processes of the app that play sound from deeper in its tree, recorded apart
-    /// because Windows records a process with its direct children only) into audio-app.wav. They all start together.
+    /// Mixes the part files of one kind of track (the system audio of each output device) into the first one,
+    /// e.g. audio-system-2.wav into audio-system.wav. They all start together.
     /// </summary>
-    private static void MergeAppParts(string folder, List<Track> tracks, Action<string, string> report)
+    private static void MergeParts(string folder, List<Track> tracks, string kind, Action<string, string> report)
     {
-        var parts = tracks.Where(t => t.Kind == "app").ToList();
+        var parts = tracks.Where(t => t.Kind == kind).ToList();
         if (parts.Count < 2)
             return;
-        var main = parts.FirstOrDefault(t => t.File == RecordingAudio.AppFileName) ?? parts[0];
+        var main = parts[0];
         var others = parts.Where(t => t != main).ToList();
         string path = Path.Combine(folder, main.File);
         string temp = path + SoundTempSuffix;
@@ -309,7 +331,7 @@ static class RecordingFinisher
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException)
         {
             TryDelete(temp);
-            report("warning", $"The app audio parts in {Path.GetFileName(folder)} could not be mixed and were kept apart: {ex.Message}");
+            report("warning", $"The {kind} audio parts in {Path.GetFileName(folder)} could not be mixed and were kept apart: {ex.Message}");
         }
     }
 
@@ -421,8 +443,6 @@ static class RecordingFinisher
         DateTime ended = entries.Max(e => e.Time);
         var system = tracks.FirstOrDefault(t => t.Kind == "system");
         var microphone = tracks.FirstOrDefault(t => t.Kind == "mic");
-        var app = tracks.FirstOrDefault(t => t.Kind == "app");
-        string? appName = recording?.App ?? videos.FirstOrDefault(v => v.App != null)?.App;
 
         var text = new StringBuilder();
         text.AppendLine($"# {Path.GetFileName(folder)}");
@@ -453,22 +473,18 @@ static class RecordingFinisher
                 + $"H.264. {sound}{end} | {At(video.Start)} | {Duration(video.Length)} |");
         }
         if (system != null)
-            text.AppendLine($"| `{system.File}` | Everything the PC played: every app, on every speaker or headset (the output device "
-                + $"doesn't matter), stereo. {Sound(system)} | {At(system.Start)} | {Duration(system.Length)} |");
-        if (app != null)
-            text.AppendLine($"| `{app.File}` | Only the sound of {appName ?? "the recorded program"} and the processes it started, on any output "
-                + $"device: in a call, the other participants. Also in `{system?.File}`. Stereo. {Sound(app)} | {At(app.Start)} | {Duration(app.Length)} |");
+            text.AppendLine($"| `{system.File}` | Everything the PC played: every app, on every speaker or headset (each output "
+                + $"device is recorded and they are mixed): in a call, the other participants. Stereo. {Sound(system)} "
+                + $"| {At(system.Start)} | {Duration(system.Length)} |");
         if (microphone != null)
             text.AppendLine($"| `{microphone.File}` | The microphone in use, mono; see *Microphone* for which one when. {Sound(microphone)} "
                 + $"| {At(microphone.Start)} | {Duration(microphone.Length)} |");
         text.AppendLine($"| `{ReadmeFileName}` | This description. | | |");
+        text.AppendLine($"| `{ManifestFileName}` | The same facts for programs (JSON). | | |");
 
         var missing = new List<string>();
         if (system == null)
             missing.Add(settings.SystemAudioDeviceId == AppSettings.DisabledDevice ? "No system audio: it is turned off in the tray menu." : "No system audio: it could not be recorded.");
-        if (app == null && system != null)
-            missing.Add("No `audio-app` file: no single program owns what was recorded (a whole display, or a window of a program "
-                + "that hosts other apps' windows), so its sound can't be told apart; it is all in the system audio.");
         if (microphone == null)
             missing.Add(settings.MicrophoneDeviceId == AppSettings.DisabledDevice ? "No microphone: it is turned off in the tray menu." : "No microphone: it could not be recorded.");
         foreach (string line in missing)
@@ -530,6 +546,84 @@ static class RecordingFinisher
                 text.AppendLine($"- {note}");
         }
         return text.ToString();
+    }
+
+    /// <summary>Why the recording holds only one side of a call, or null when both sides have sound.</summary>
+    private static string? OneSided(Track? system, Track? microphone)
+    {
+        if (system?.Stats?.SoundSeconds is not { } heard || microphone?.Stats?.SoundSeconds is not { } spoken)
+            return null;
+        return spoken >= OneSidedMicSeconds && heard < OneSidedSystemSeconds
+            ? $"Only one side was recorded: the microphone has {Duration(TimeSpan.FromSeconds(spoken))} of sound but the "
+              + $"system audio only {heard:0} s, so what the other participants said is missing."
+            : null;
+    }
+
+    private static readonly JsonSerializerOptions ManifestOptions = new()
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+    };
+
+    /// <summary>recording.json: README.md's facts for programs, e.g. an analysis that decides which files to use.</summary>
+    private static string Manifest(JournalEntry? recording, List<Video> videos, List<Track> tracks, List<JournalEntry> entries, List<string> notes)
+    {
+        long origin = videos.Select(v => v.Start).Concat(tracks.Select(t => t.Start)).DefaultIfEmpty(entries[0].Qpc).Min();
+        double At(long qpc) => Math.Round(Math.Max(0, qpc - origin) / (double)TimeSpan.TicksPerSecond, 1);
+        var system = tracks.FirstOrDefault(t => t.Kind == "system");
+        var microphone = tracks.FirstOrDefault(t => t.Kind == "mic");
+        string? mixed = system != null || microphone != null
+            ? string.Join(",", new[] { system, microphone }.Where(t => t != null).Select(t => t!.File))
+            : null;
+        var files = new List<object>();
+        foreach (var video in videos)
+            files.Add(new
+            {
+                File = video.File,
+                Kind = "video",
+                Holds = video.Description ?? video.Target,
+                App = video.App,
+                StartSeconds = At(video.Start),
+                LengthSeconds = Math.Round(video.Length.TotalSeconds, 1),
+                SoundIsMixOf = video.SoundError == null ? mixed?.Split(',') : null,
+                Error = video.Error ?? video.SoundError,
+            });
+        foreach (var track in tracks)
+            files.Add(new
+            {
+                File = track.File,
+                Kind = track.Kind == "mic" ? "microphone" : track.Kind,
+                Holds = track.Kind switch
+                {
+                    "system" => "everything the PC played, on every output device: in a call, the other participants",
+                    "mic" => "the microphone in use: the person who recorded",
+                    _ => track.Kind,
+                },
+                Speaker = track.Kind switch { "system" => "others", "mic" => "me", _ => null },
+                StartSeconds = At(track.Start),
+                LengthSeconds = Math.Round(track.Length.TotalSeconds, 1),
+                SoundSeconds = track.Stats?.SoundSeconds,
+                PeakDb = track.Stats?.PeakDb,
+                Silent = track.Stats?.SoundSeconds is { } seconds ? seconds < 1 : (bool?)null,
+                MinutePeaksDb = track.Stats?.MinutePeaks,
+                Sources = track.Sources.Select(e => new { AtSeconds = At(e.Qpc), Text = e.Text }).ToList(),
+            });
+        var manifest = new
+        {
+            Schema = 1,
+            Recorder = "Meeting Recorder",
+            Started = entries.Min(e => e.Time),
+            Ended = entries.Max(e => e.Time),
+            What = recording?.Text,
+            Target = recording?.Target,
+            App = recording?.App,
+            Auto = recording?.Auto,
+            Clock = "start_seconds and at_seconds are on one clock for every file, starting with the first file",
+            Files = files,
+            Notes = notes,
+        };
+        return JsonSerializer.Serialize(manifest, ManifestOptions);
     }
 
     private static string Sound(Track track)

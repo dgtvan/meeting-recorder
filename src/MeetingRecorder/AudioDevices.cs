@@ -75,25 +75,23 @@ static class AudioDevices
             : string.Join("; ", users.GroupBy(u => u.DeviceName).Select(g => $"{g.Key}: {string.Join(", ", g.Select(u => u.Process))}"));
     }
 
-    /// <summary>Every process with an audio session on an output device, playing now or earlier: the ones that make sound.</summary>
-    public static HashSet<uint> PlayingProcesses()
+    /// <summary>The id and name of every connected and enabled output device, the Windows default for apps first.</summary>
+    public static List<(string Id, string Name)> ActiveOutputs()
     {
-        var pids = new HashSet<uint>();
+        var outputs = new List<(string Id, string Name)>();
         using var enumerator = new MMDeviceEnumerator();
+        string? defaultId = null;
+        if (enumerator.HasDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia))
+        {
+            using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            defaultId = device.ID;
+        }
         foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
         {
             using (device)
-            {
-                var sessions = device.AudioSessionManager.Sessions;
-                for (int i = 0; i < sessions.Count; i++)
-                {
-                    using var session = sessions[i];
-                    if (session.GetProcessID != 0)
-                        pids.Add(session.GetProcessID);
-                }
-            }
+                outputs.Add((device.ID, device.FriendlyName));
         }
-        return pids;
+        return outputs.OrderBy(o => o.Id != defaultId).ToList();
     }
 
     /// <summary>"muted, volume 80%" for a capture device, for the log; empty when it can't be read.</summary>

@@ -92,25 +92,6 @@ static class ProcessTree
         return false;
     }
 
-    /// <summary>
-    /// The processes to record so that every process of <paramref name="app"/>'s tree in <paramref name="playing"/> is
-    /// heard: <paramref name="app"/> itself, plus the parent of each one that isn't covered yet. Windows' process
-    /// loopback takes a process "and its child processes", but only direct children are included (measured: a
-    /// grandchild's sound is missing), while apps play from deeper down, e.g. Teams' web views.
-    /// </summary>
-    public static List<uint> LoopbackRoots(uint app, IEnumerable<uint> playing, Dictionary<uint, uint> parents)
-    {
-        var roots = new List<uint> { app };
-        foreach (uint pid in playing.Where(p => IsInTree(p, app, parents)).Order())
-        {
-            uint parent = parents.GetValueOrDefault(pid);
-            if (roots.Contains(pid) || roots.Contains(parent))
-                continue;
-            roots.Add(IsInTree(parent, app, parents) ? parent : pid);
-        }
-        return roots;
-    }
-
     private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
     [DllImport("user32.dll")]
