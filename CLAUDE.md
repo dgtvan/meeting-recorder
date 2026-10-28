@@ -32,6 +32,10 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
   investigated afterwards.
 - Auto-record is per meeting app: each `IMeetingApp` in `MeetingApps.All` gets an `AutoRecorder` (call detection,
   per-call folder, tidy-up, `meetings.log`). App-specific detection belongs in the `IMeetingApp`, not in the tray.
+- Screen share: `IMeetingApp.FindShare` (Teams: its `ScreenBorderWindow`) finds what is shared; `AutoRecorder` records
+  it as `share.mp4` on window events and writes the cut back (`share-end`) to `call.journal.jsonl`; the finisher
+  re-encodes the main video with the share cut in (`VideoCompositor`). Test the cutting with a made-up folder of
+  videos and journals and `--finish`, not by sharing.
 - Startup initialization (standard 4.2) is `AppInitializer`; settings migrations go there, keyed on `SchemaVersion`.
 - Close requests (standard 3.5, 4.4) are answered in `TrayApp.OnExitRequested`.
 

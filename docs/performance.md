@@ -12,6 +12,20 @@ cd bench
 `bench.ps1` replays the test video through the recorder (`--record --file`), so nothing is captured from the
 screen. Its CPU and GPU figures include decoding the source video, so only compare them between runs.
 
+## 2026-10-28: cutting a screen share into video.mp4
+
+The finisher decodes the meeting video and the share, scales both into one frame (NV12, Media Foundation video
+processor) and re-encodes H.264 in quality mode (`VideoQuality`, Main profile). Synthetic videos at a constant frame rate,
+which is more frames than a real recording (a real 19 min call had 11,777 frames, about 10 fps on average):
+
+| Run | Frames out | Time | Output |
+|---|---|---|---|
+| 60 s at 1352x992 + 25 s share at 2560x1440, into 2560x1440 | 1,800 | 13 s | 1.4 MB (inputs 0.8 MB) |
+| 10 min at 1920x1080 + 5 min share at 1920x1080, 15 fps | 9,000 | 79 s | 11.8 MB (inputs 7.6 MB) |
+
+About 115 frames/s at 1080p, so about 5 s per minute of a real call. The save timeout per recorded minute went from
+15 to 30 s. Only calls with a share pay this; the others are muxed without re-encoding as before.
+
 ## 2026-10-23: sound track in video.mp4
 
 The video now carries system audio and microphone mixed into one AAC track (128 kbps stereo, encoded live by the

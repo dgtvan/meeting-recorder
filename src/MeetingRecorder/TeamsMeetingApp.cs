@@ -13,6 +13,8 @@ sealed class TeamsMeetingApp : IMeetingApp
     private const string ProcessName = "ms-teams";
     private const string WindowClass = "TeamsWebView";
     private const string TitleSuffix = " | Microsoft Teams";
+    // While you share, Teams draws a border around what is shared in a window of this class, hidden from capture.
+    private const string ShareBorderClass = "ScreenBorderWindow";
 
     private static readonly HashSet<string> MainWindowSections = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -35,6 +37,22 @@ sealed class TeamsMeetingApp : IMeetingApp
             .ToList();
 
     public List<IntPtr> FindAppWindows() => MeetingWindows.VisibleWindows(MeetingWindows.ProcessIds(ProcessName));
+
+    /// <remarks>
+    /// The share border has the shared window's frame bounds (following it as it moves) or the shared display's.
+    /// Teams shows it as a 1x1 window for a moment while a share starts and ends.
+    /// </remarks>
+    public SharedContent? FindShare()
+    {
+        var processIds = MeetingWindows.ProcessIds(ProcessName);
+        foreach (IntPtr hwnd in MeetingWindows.VisibleWindows(processIds))
+        {
+            if (MeetingWindows.ClassName(hwnd) == ShareBorderClass && MeetingWindows.Bounds(hwnd) is { } bounds
+                && !MeetingWindows.IsTiny(bounds))
+                return new SharedContent(bounds, MeetingWindows.SharedTarget(bounds, processIds));
+        }
+        return null;
+    }
 
     /// <summary>"Daily standup | Microsoft Teams" gives "Daily standup"; main-window titles give null.</summary>
     internal static string? MeetingName(string title)

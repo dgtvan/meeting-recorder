@@ -17,6 +17,12 @@ sealed record RecordingTarget(string Name, IntPtr WindowHandle, string? DisplayD
     /// </summary>
     public uint? AppProcessId { get; init; }
 
+    /// <summary>
+    /// The window or display the user shares in an auto-recorded call, recorded as share.mp4 and cut into the meeting's
+    /// video by the finisher.
+    /// </summary>
+    public bool IsShare { get; init; }
+
     /// <summary>What is recorded, for the journal and README.md.</summary>
     public string Description => IsAudioOnly ? Name
         : SourceFile != null ? $"the video file {SourceFile} (a test)"
@@ -379,6 +385,15 @@ sealed class RecordingSession
     /// </summary>
     public static string NumberedVideoFileName(int number) =>
         number == 1 ? VideoFileName : $"{Path.GetFileNameWithoutExtension(VideoFileName)}-{number}{Path.GetExtension(VideoFileName)}";
+
+    /// <summary>The name of the <paramref name="number"/>th screen share of a call: share.mp4, share-2.mp4, ...</summary>
+    public static string ShareVideoFileName(int number) => number == 1 ? $"{SharePrefix}.mp4" : $"{SharePrefix}-{number}.mp4";
+
+    /// <summary>True for a call's screen share video, which the finisher cuts into the meeting's video.</summary>
+    public static bool IsShareVideo(string fileName) =>
+        fileName.StartsWith(SharePrefix + ".", StringComparison.OrdinalIgnoreCase) || fileName.StartsWith(SharePrefix + "-", StringComparison.OrdinalIgnoreCase);
+
+    private const string SharePrefix = "share";
 
     /// <summary>Removes the recording folder when a recording failed before writing anything.</summary>
     public void DeleteFolderIfEmpty()

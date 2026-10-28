@@ -29,7 +29,19 @@ interface IMeetingApp
 
     /// <summary>Every visible top-level window of the app, described in the log to tell its windows apart.</summary>
     List<IntPtr> FindAppWindows();
+
+    /// <summary>
+    /// What the user shares in the call (<see cref="SharedContent"/>), or null when nothing is shared. Called on every
+    /// window shown, hidden, minimized or restored during a call, so it must be cheap.
+    /// </summary>
+    SharedContent? FindShare();
 }
+
+/// <summary>
+/// A screen share in progress: <paramref name="Bounds"/> is what the meeting app marks as shared, and
+/// <paramref name="Target"/> the window or display that shows it, recorded as a screen share; null while it can't be told.
+/// </summary>
+sealed record SharedContent(Rectangle Bounds, RecordingTarget? Target);
 
 /// <summary>The meeting apps the app can auto-record.</summary>
 static class MeetingApps

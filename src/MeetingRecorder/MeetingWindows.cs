@@ -11,6 +11,7 @@ static class MeetingWindows
 {
     private const int MinWindowSize = 100;
     private const int DWMWA_CLOAKED = 14;
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     private const uint WDA_NONE = 0;
 
     /// <summary>The ids of every running process with this name (no ".exe").</summary>
@@ -77,10 +78,48 @@ static class MeetingWindows
             return "excluded from capture";
         if (Bounds(hwnd) is not { } bounds)
             return "gone";
-        if (bounds.Width < MinWindowSize || bounds.Height < MinWindowSize)
+        if (IsTiny(bounds))
             return "tiny";
         return Screen.AllScreens.Any(screen => screen.Bounds.IntersectsWith(bounds)) ? null : "off screen";
     }
+
+    public static bool IsTiny(Rectangle bounds) => bounds.Width < MinWindowSize || bounds.Height < MinWindowSize;
+
+    /// <summary>
+    /// The display or window whose bounds match what a meeting app marks as shared: a whole display, else the top
+    /// window (of another app) whose frame matches within a few pixels; null when nothing matches.
+    /// </summary>
+    public static RecordingTarget? SharedTarget(Rectangle shared, HashSet<uint> appProcessIds)
+    {
+        if (Screen.AllScreens.FirstOrDefault(screen => Near(screen.Bounds, shared, 2)) is { } display)
+            return RecordingTarget.ForDisplay(display.DeviceName) with { Name = "shared screen", IsShare = true };
+
+        RecordingTarget? found = null;
+        uint ownProcessId = (uint)Environment.ProcessId;
+        EnumWindows((hwnd, _) =>
+        {
+            GetWindowThreadProcessId(hwnd, out uint processId);
+            if (!IsWindowVisible(hwnd) || processId == ownProcessId || appProcessIds.Contains(processId) || NotShownReason(hwnd) != null
+                || FrameBounds(hwnd) is not { } frame || !Near(frame, shared, ShareTolerance))
+                return true;
+            string title = Title(hwnd);
+            found = RecordingTarget.ForWindow(new WindowInfo(hwnd, title.Length > 0 ? title : "shared window")) with { IsShare = true };
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    // Teams' share border and a window's frame can differ by its resize border.
+    private const int ShareTolerance = 12;
+
+    private static bool Near(Rectangle a, Rectangle b, int tolerance) =>
+        Math.Abs(a.Left - b.Left) <= tolerance && Math.Abs(a.Top - b.Top) <= tolerance
+        && Math.Abs(a.Right - b.Right) <= tolerance && Math.Abs(a.Bottom - b.Bottom) <= tolerance;
+
+    /// <summary>The window's visible frame (without the invisible resize border), as DWM draws it.</summary>
+    private static Rectangle? FrameBounds(IntPtr hwnd) =>
+        DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out RECT r, Marshal.SizeOf<RECT>()) == 0
+            ? Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom) : Bounds(hwnd);
 
     public static Rectangle? Bounds(IntPtr hwnd) =>
         GetWindowRect(hwnd, out RECT r) ? Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom) : null;
@@ -121,6 +160,9 @@ static class MeetingWindows
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT value, int size);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT

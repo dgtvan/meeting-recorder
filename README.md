@@ -97,7 +97,7 @@ during the call and one set of audio files:
 
 | File | Content |
 |---|---|
-| `video.mp4`, `video-2.mp4`, ... | One per meeting window, in the order they opened (e.g. the meeting and a second window Teams opens while you share, or a call on hold); each has the call's sound for its own time span mixed in |
+| `video.mp4`, `video-2.mp4`, ... | One per meeting window, in the order they opened (e.g. the meeting and a call on hold); each has the call's sound for its own time span mixed in. While you share your screen, the main one shows what you share instead (see below) |
 | `audio-system.m4a`, `audio-mic.m4a` | The whole call, recorded once, from the first window's start until the call ends; `audio-system` holds the other participants, `audio-mic` the microphone the meeting app uses |
 | `README.md` | As for any recording; *Starts at* lines each video up with the audio files |
 
@@ -120,8 +120,14 @@ Supported apps: **Microsoft Teams** (new Teams).
 - Stopping an automatic recording by hand keeps that window unrecorded for the rest of the call; stopping the last
   one stops the call's audio too. A recording you started yourself is never stopped automatically, gets a folder of
   its own, and if it is of a meeting window, no automatic one starts for it.
-- While you share your screen, Teams minimizes the meeting window, so its video shows the last frame
-  until it's restored. The audio is recorded throughout.
+- **Screen share:** while you share a window or a screen, what you share is recorded too (`share.mp4`, found from the
+  border Teams draws around it, the moment it appears). When the call is saved it is cut into the main `video.mp4`:
+  the meeting window, then what you share from its first frame, then the meeting window again from the moment it
+  shows again (Teams minimizes it while you share), or 5 s after the share stopped. Both are scaled into one frame
+  size with black bars, with hard cuts; a share shorter than 2 s is left out. This re-encodes `video.mp4`, which adds
+  about 5 s of saving per minute of the call; calls without a share are saved as before. README.md and
+  recording.json say when the video shows the share. If what is shared can't be told (`--meeting-status` prints
+  `share unknown`), it isn't recorded and `meetings.log` says so.
 - `meetings.log` in the data folder records what auto-record did in each call (windows recorded, how long, files
   dropped or renamed) and, whenever the app's windows change during a call, a `--meeting-status` description of each
   one (size, position, styles, button names), for working out which window is which. Each entry starts with the

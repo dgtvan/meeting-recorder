@@ -23,6 +23,11 @@ sealed record JournalEntry
     public const string TrackEnd = "track-end";
     /// <summary>Something that happened during the recording, e.g. a device was plugged in.</summary>
     public const string Event = "event";
+    /// <summary>
+    /// The screen share recorded in <see cref="File"/> is over from here on: the meeting window shows again, or the
+    /// share stopped a while ago. Written by the tray; the finisher cuts back to the meeting window here.
+    /// </summary>
+    public const string ShareEnd = "share-end";
 
     public string Kind { get; init; } = "";
     public DateTime Time { get; init; } = DateTime.Now;

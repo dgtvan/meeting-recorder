@@ -40,6 +40,13 @@ static class MeetingWindowReport
             output.WriteLine("window none");
         foreach (var window in recordable)
             output.WriteLine($"window {window.Handle} {window.Title}");
+        output.WriteLine(app.FindShare() switch
+        {
+            null => "share none",
+            { Target: null } share => $"share unknown: nothing matches {Rect(share.Bounds)}",
+            { Target: { WindowHandle: var hwnd } target } when hwnd != IntPtr.Zero => $"share window {hwnd} {target.Name}",
+            { Target: var target } => $"share display {target.DisplayDeviceName}",
+        });
 
         foreach (IntPtr hwnd in app.FindAppWindows())
         {
@@ -61,12 +68,14 @@ static class MeetingWindowReport
             output.WriteLine($"app-window {hwnd} class={MeetingWindows.ClassName(hwnd)} title=\"{title}\"");
             output.WriteLine($"  meeting={(meetings.TryGetValue(hwnd, out string? name) ? $"\"{name}\"" : "no")}"
                 + $" shown={MeetingWindows.NotShownReason(hwnd) ?? "yes"}"
-                + $" rect={(bounds is { } b ? $"{b.X},{b.Y} {b.Width}x{b.Height}" : "none")}"
+                + $" rect={(bounds is { } b ? Rect(b) : "none")}"
                 + (flags.Count > 0 ? " " + string.Join(' ', flags) : ""));
             output.WriteLine($"  buttons: {Buttons(hwnd)}");
             output.Flush();
         }
     }
+
+    private static string Rect(Rectangle r) => $"{r.X},{r.Y} {r.Width}x{r.Height}";
 
     /// <summary>The names of the first buttons in the window, or why they couldn't be read.</summary>
     private static string Buttons(IntPtr hwnd)

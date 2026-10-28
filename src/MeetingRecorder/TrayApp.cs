@@ -22,7 +22,8 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan SaveTimeout = TimeSpan.FromMinutes(2);
     // Mixing the sound into the videos and compressing three audio files takes about 5 s per recorded minute.
-    private static readonly TimeSpan FinishTimePerMinute = TimeSpan.FromSeconds(15);
+    // Cutting a screen share into the video re-encodes it, about 5 s per minute of a call.
+    private static readonly TimeSpan FinishTimePerMinute = TimeSpan.FromSeconds(30);
     // A folder touched more recently than this may still be written by a recorder of an app that was killed.
     private static readonly TimeSpan UnfinishedQuietTime = TimeSpan.FromMinutes(2);
 
@@ -209,8 +210,8 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
     {
         bool hasProblem = _problems.Count > 0;
         // A call's audio counts only while none of its windows is being recorded, e.g. between the pre-join screen
-        // and the meeting window.
-        int recording = Math.Max(_recordings.Count(r => r.Phase == RecordingPhase.Recording && !r.IsAudio),
+        // and the meeting window. A screen share is part of its call's video.
+        int recording = Math.Max(_recordings.Count(r => r.Phase == RecordingPhase.Recording && !r.IsAudio && !r.IsShare),
             _recordings.Any(r => r.Phase == RecordingPhase.Recording) ? 1 : 0);
         _tray.Icon = recording > 0 ? Frame(TrayIcons.Recording(recording, hasProblem))
             : _recordings.Any(r => r.Phase == RecordingPhase.Starting) ? TrayIcons.Starting
@@ -513,12 +514,14 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
         ActiveRecording? recording = null;
         try
         {
-            string videoFile = call?.NextVideoFile ?? RecordingSession.VideoFileName;
+            string videoFile = call == null ? RecordingSession.VideoFileName : target.IsShare ? call.NextShareFile : call.NextVideoFile;
             var output = call == null ? new RecordingOutput() : new RecordingOutput(call.Folder, videoFile, AudioFiles: target.IsAudioOnly);
             var process = new RecordingProcess(_ui, target, output);
             var added = recording = new ActiveRecording(process, target, call, videoFile);
             if (call != null && target.IsAudioOnly)
                 call.Audio = added;
+            else if (target.IsShare)
+                call?.Shares.Add(added);
             else
                 call?.Videos.Add(added);
             process.Started += _ =>
@@ -552,6 +555,7 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
             {
                 _recordings.Remove(recording);
                 call?.Videos.Remove(recording);
+                call?.Shares.Remove(recording);
                 if (call?.Audio == recording)
                     call.Audio = null;
             }
@@ -711,7 +715,7 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
     {
         if (!Directory.Exists(call.Folder))
             return;
-        TimeSpan length = call.Videos.Append(call.Audio).OfType<ActiveRecording>()
+        TimeSpan length = call.Videos.Concat(call.Shares).Append(call.Audio).OfType<ActiveRecording>()
             .Select(r => r.Process.CapturedFor ?? TimeSpan.Zero).DefaultIfEmpty().Max();
         StartFinishing(call.Folder, auto: true, call, length);
     }

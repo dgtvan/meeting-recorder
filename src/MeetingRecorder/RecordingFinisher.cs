@@ -35,8 +35,12 @@ static class RecordingFinisher
     /// <summary>An auto-recorded call, or a video of one, shorter than this is deleted: a pre-join screen, a call left at once.</summary>
     public static readonly TimeSpan MinAutoRecording = TimeSpan.FromSeconds(30);
 
+    /// <summary>A screen share shorter than this isn't cut into the meeting's video: one started and cancelled at once.</summary>
+    private static readonly TimeSpan MinShare = TimeSpan.FromSeconds(2);
+
     private const string CompressedAudioExtension = ".m4a";
     private const string SoundTempSuffix = ".sound.tmp";
+    private const string CompositeTempSuffix = ".composite.tmp";
     // The lowest bitrates the Windows AAC encoder offers; transparent for meeting audio.
     private const int StereoAacBitrate = 128_000;
     private const int MonoAacBitrate = 96_000;
@@ -89,8 +93,14 @@ static class RecordingFinisher
         public long? End { get; set; }
         public string? Error { get; set; }
         public string? SoundError { get; set; }
+        /// <summary>A screen share: where the tray cut back to the meeting window (<see cref="JournalEntry.ShareEnd"/>).</summary>
+        public long? ShareEnd { get; set; }
+        /// <summary>The screen shares cut into this video.</summary>
+        public List<SharedSpan> Shares { get; } = [];
         public TimeSpan Length => TimeSpan.FromTicks((End ?? Start) - Start);
     }
+
+    private sealed record SharedSpan(long Start, long End, string What);
 
     private sealed class Track(string kind, string file)
     {
@@ -110,6 +120,7 @@ static class RecordingFinisher
     {
         // Left by a finisher that was killed: a half-written sound track or compressed file.
         foreach (string stale in Directory.EnumerateFiles(folder, "*" + SoundTempSuffix)
+                     .Concat(Directory.EnumerateFiles(folder, "*" + CompositeTempSuffix))
                      .Concat(Directory.EnumerateFiles(folder, RecordingSession.TempFileName("*" + CompressedAudioExtension))))
             TryDelete(stale);
         if (RecordingSession.FinalizeFiles(folder) is { } renameError)
@@ -151,6 +162,9 @@ static class RecordingFinisher
                     stopped.End = entry.Qpc;
                     stopped.Stats = entry;
                     break;
+                case JournalEntry.ShareEnd when videos.LastOrDefault(v => v.File == entry.File) is { } share:
+                    share.ShareEnd ??= entry.Qpc;
+                    break;
             }
         }
         // A recorder that was killed never wrote its end; its last entry is the best guess.
@@ -160,6 +174,8 @@ static class RecordingFinisher
             track.End ??= lastSeen;
         videos.RemoveAll(v => !File.Exists(Path.Combine(folder, v.File)));
         tracks.RemoveAll(t => !File.Exists(Path.Combine(folder, t.File)));
+        var shares = videos.Where(v => RecordingSession.IsShareVideo(v.File)).ToList();
+        videos.RemoveAll(shares.Contains);
 
         var notes = new List<string>();
         var dropped = new List<string>();
@@ -175,6 +191,8 @@ static class RecordingFinisher
             }
             DropShortVideos(folder, videos, notes, dropped, report);
         }
+        if (shares.Count > 0)
+            CutInShares(folder, videos, shares, entries, notes, dropped, settings, report);
 
         foreach (string kind in tracks.Select(t => t.Kind).Distinct().ToList())
             MergeParts(folder, tracks, kind, report);
@@ -242,16 +260,18 @@ static class RecordingFinisher
             CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed) ? parsed : fallback;
 
     /// <summary>
-    /// Deletes the videos of windows open only briefly (the pre-join screen before the meeting window) and numbers the
-    /// rest in order: video.mp4, video-2.mp4, ...
+    /// Deletes the videos of windows open only briefly (the pre-join screen before the meeting window), but never the
+    /// call's longest, and numbers the rest in order: video.mp4, video-2.mp4, ...
     /// </summary>
     private static void DropShortVideos(string folder, List<Video> videos, List<string> notes, List<string> dropped,
         Action<string, string> report)
     {
-        foreach (var video in videos.Where(v => v.Length < MinAutoRecording).ToList())
+        // The call itself lasted long enough to keep, so its longest video stays even if it is a bit shorter.
+        var main = videos.MaxBy(v => v.Length);
+        foreach (var video in videos.Where(v => v != main && v.Length < MinAutoRecording).ToList())
         {
             File.Delete(Path.Combine(folder, video.File));
-            string text = $"{video.File} ({video.Target}) dropped: {video.Length.TotalSeconds:0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.";
+            string text = $"{video.File} ({video.Target}) dropped: {video.Length.TotalSeconds:0.0} s, shorter than {MinAutoRecording.TotalSeconds:0} s.";
             notes.Add(text);
             report("dropped", $"{Path.GetFileName(folder)}: {text}");
             dropped.Add(video.File);
@@ -269,6 +289,76 @@ static class RecordingFinisher
             videos[i].OriginalFile = videos[i].File;
             videos[i].File = numbered;
         }
+    }
+
+    /// <summary>
+    /// Re-encodes the meeting's main video (the longest) with the screen shares cut in: from a share's first frame
+    /// until the tray cut back (the meeting window showed again), the shared window or display is shown instead, both
+    /// scaled into the larger frame size. The share files are deleted once cut in; if that fails they are kept as
+    /// videos of their own. Without a meeting video the shares are kept as they are.
+    /// </summary>
+    private static void CutInShares(string folder, List<Video> videos, List<Video> shares, List<JournalEntry> entries,
+        List<string> notes, List<string> dropped, AppSettings settings, Action<string, string> report)
+    {
+        foreach (var share in shares)
+            share.ShareEnd = Math.Min(share.ShareEnd ?? share.End!.Value, share.End!.Value);
+        foreach (var share in shares.Where(s => TimeSpan.FromTicks(s.ShareEnd!.Value - s.Start) < MinShare).ToList())
+        {
+            TryDelete(Path.Combine(folder, share.File));
+            notes.Add($"{share.File} ({share.Target}) dropped: a screen share shorter than {MinShare.TotalSeconds:0} s.");
+            dropped.Add(share.File);
+            shares.Remove(share);
+        }
+        var main = videos.MaxBy(v => v.Length);
+        if (shares.Count == 0 || main == null)
+        {
+            videos.AddRange(shares);
+            return;
+        }
+
+        shares.Sort((a, b) => a.Start.CompareTo(b.Start));
+        string mainPath = Path.Combine(folder, main.File);
+        string temp = mainPath + CompositeTempSuffix;
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var all = shares.Prepend(main).ToList();
+            var sizes = all.Select(v => VideoCompositor.FrameSize(Path.Combine(folder, v.File))).OfType<Size>().ToList();
+            if (sizes.Count == 0)
+                throw new InvalidDataException("The videos' frame sizes can't be read.");
+            var frameSize = sizes.MaxBy(s => s.Width * (long)s.Height);
+            var inputs = all.Select(v => new VideoCompositor.Input(Path.Combine(folder, v.File), v.Start - main.Start)).ToList();
+            var cuts = new List<VideoCompositor.Cut> { new(0, 0) };
+            for (int i = 0; i < shares.Count; i++)
+            {
+                long start = Math.Max(0, shares[i].Start - main.Start);
+                long end = shares[i].ShareEnd!.Value - main.Start;
+                if (i + 1 < shares.Count)
+                    end = Math.Min(end, shares[i + 1].Start - main.Start);
+                cuts.Add(new(start, i + 1));
+                cuts.Add(new(end, 0));
+            }
+            VideoCompositor.Write(inputs, cuts, frameSize, settings.VideoQuality, temp);
+            File.Move(temp, mainPath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            TryDelete(temp);
+            report("warning", $"The screen share in {Path.GetFileName(folder)} could not be cut into {main.File} and is kept "
+                + $"as a video of its own: {ex.Message}");
+            videos.AddRange(shares);
+            return;
+        }
+
+        report("log", $"Cut {shares.Count} screen share(s) into {main.File} in {stopwatch.Elapsed.TotalSeconds:0} s.");
+        foreach (var share in shares)
+        {
+            TryDelete(Path.Combine(folder, share.File));
+            main.Shares.Add(new SharedSpan(share.Start, share.ShareEnd!.Value, share.Description ?? share.Target));
+            foreach (var entry in entries.Where(e => e.File == share.File))
+                entry.File = $"{main.File} (screen share)";
+        }
+        main.End = Math.Max(main.End ?? main.Start, shares.Max(s => s.ShareEnd!.Value));
     }
 
     /// <summary>
@@ -469,8 +559,9 @@ static class RecordingFinisher
                 : mixed.Length == 0 ? "No sound: no audio was recorded."
                 : $"Its sound is {mixed} mixed, for watching.";
             string end = video.Error != null ? $" The video stopped early: {Cell(video.Error)}." : "";
+            string shared = string.Concat(video.Shares.Select(s => $" From {At(s.Start)} to {At(s.End)} it shows your screen share instead: {Cell(s.What)}."));
             text.AppendLine($"| `{video.File}` | Picture of {Cell(video.Description ?? video.Target)}{(video.App != null ? $" ({video.App})" : "")}, "
-                + $"H.264. {sound}{end} | {At(video.Start)} | {Duration(video.Length)} |");
+                + $"H.264.{shared} {sound}{end} | {At(video.Start)} | {Duration(video.Length)} |");
         }
         if (system != null)
             text.AppendLine($"| `{system.File}` | Everything the PC played: every app, on every speaker or headset (each output "
@@ -531,6 +622,7 @@ static class RecordingFinisher
                 JournalEntry.TrackSource => $"{entry.File}: now recording {entry.Text}",
                 JournalEntry.TrackEnd => $"{entry.File}: stopped",
                 JournalEntry.Event => entry.Text,
+                JournalEntry.ShareEnd => $"{entry.File}: back to the meeting window",
                 _ => null,
             };
             if (line != null)
@@ -587,6 +679,8 @@ static class RecordingFinisher
                 StartSeconds = At(video.Start),
                 LengthSeconds = Math.Round(video.Length.TotalSeconds, 1),
                 SoundIsMixOf = video.SoundError == null ? mixed?.Split(',') : null,
+                ScreenShares = video.Shares.Count == 0 ? null
+                    : video.Shares.Select(s => new { StartSeconds = At(s.Start), EndSeconds = At(s.End), Holds = s.What }).ToList(),
                 Error = video.Error ?? video.SoundError,
             });
         foreach (var track in tracks)
