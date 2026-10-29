@@ -373,7 +373,9 @@ sealed class RecordingSession
         _tracker?.Dispose();
         _recorder?.Dispose();
         _recorder = null;
-        if (FinalizeFiles(FolderPath, OwnFileNames) is { } renameError)
+        // A video stopped before its first frame is empty, and the recorder holds it until this process exits: the
+        // finisher deletes it.
+        if (FinalizeFiles(FolderPath, OwnFileNames.Where(name => _videoStarted || name != _output.VideoFileName)) is { } renameError)
             Warning?.Invoke(renameError);
         if (error != null)
             DeleteFolderIfEmpty();

@@ -123,6 +123,10 @@ static class RecordingFinisher
                      .Concat(Directory.EnumerateFiles(folder, "*" + CompositeTempSuffix))
                      .Concat(Directory.EnumerateFiles(folder, RecordingSession.TempFileName("*" + CompressedAudioExtension))))
             TryDelete(stale);
+        // Left by a recording stopped before its first frame, whose recorder still held the file.
+        foreach (string empty in Directory.EnumerateFiles(folder, RecordingSession.TempFileName("*" + Path.GetExtension(RecordingSession.VideoFileName)))
+                     .Where(path => new FileInfo(path).Length == 0))
+            TryDelete(empty);
         if (RecordingSession.FinalizeFiles(folder) is { } renameError)
             report("warning", renameError);
 
@@ -430,8 +434,10 @@ static class RecordingFinisher
         if (a == null || b == null)
             return a ?? b;
         var minutes = new double[Math.Max(a.MinutePeaks?.Length ?? 0, b.MinutePeaks?.Length ?? 0)];
+        // A part of a device that played nothing has no minutes; a missing minute is silence, not 0 dBFS.
+        static double At(double[]? peaks, int i) => peaks != null && i < peaks.Length ? peaks[i] : -100;
         for (int i = 0; i < minutes.Length; i++)
-            minutes[i] = Math.Max(a.MinutePeaks?.ElementAtOrDefault(i) ?? -100, b.MinutePeaks?.ElementAtOrDefault(i) ?? -100);
+            minutes[i] = Math.Max(At(a.MinutePeaks, i), At(b.MinutePeaks, i));
         return a with
         {
             SoundSeconds = Math.Max(a.SoundSeconds ?? 0, b.SoundSeconds ?? 0),
