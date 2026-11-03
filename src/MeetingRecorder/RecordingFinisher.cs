@@ -112,6 +112,8 @@ static class RecordingFinisher
         public List<JournalEntry> Sources { get; } = [];
         /// <summary>Part files mixed into this one (system audio of further output devices).</summary>
         public List<string> Parts { get; } = [];
+        /// <summary>Where each file that went into this one sat on the recording's clock, one per part.</summary>
+        public List<AlignmentReport> Alignments { get; } = [];
         public TimeSpan Length => TimeSpan.FromTicks((End ?? Start) - Start);
     }
 
@@ -165,6 +167,8 @@ static class RecordingFinisher
                 case JournalEntry.TrackEnd when TrackOf(entry) is { } stopped:
                     stopped.End = entry.Qpc;
                     stopped.Stats = entry;
+                    if (entry.Alignment is { } trackAlignment)
+                        stopped.Alignments.Add(trackAlignment);
                     break;
                 case JournalEntry.ShareEnd when videos.LastOrDefault(v => v.File == entry.File) is { } share:
                     share.ShareEnd ??= entry.Qpc;
@@ -419,6 +423,8 @@ static class RecordingFinisher
                 main.Parts.Add(other.File);
                 main.Sources.AddRange(other.Sources);
                 main.Stats = Merge(main.Stats, other.Stats);
+                if (other.Stats?.Alignment is { } alignment)
+                    main.Alignments.Add(alignment);
                 tracks.Remove(other);
             }
         }
@@ -443,15 +449,16 @@ static class RecordingFinisher
             SoundSeconds = Math.Max(a.SoundSeconds ?? 0, b.SoundSeconds ?? 0),
             PeakDb = Math.Max(a.PeakDb ?? -100, b.PeakDb ?? -100),
             MinutePeaks = minutes,
-            FilledSeconds = Sum(a.FilledSeconds, b.FilledSeconds),
-            DroppedSeconds = Sum(a.DroppedSeconds, b.DroppedSeconds),
+            // Each part keeps its own alignment: one file's place on the clock says nothing about another's.
+            Alignment = null,
+            Details = Join(a.Details, b.Details),
         };
     }
 
-    private static double? Sum(double? a, double? b)
+    private static List<string>? Join(List<string>? a, List<string>? b)
     {
-        double total = (a ?? 0) + (b ?? 0);
-        return total > 0 ? Math.Round(total, 2) : null;
+        var lines = (a ?? []).Concat(b ?? []).ToList();
+        return lines.Count > 0 ? lines : null;
     }
 
     /// <summary>Mixes the system audio and microphone of the video's time span into it. A video that can't get its sound keeps none.</summary>
@@ -632,7 +639,7 @@ static class RecordingFinisher
                 JournalEntry.VideoEnd => $"{entry.File}: stopped{(entry.Error != null ? $", failed: {entry.Error}" : "")}",
                 JournalEntry.TrackStart => $"{entry.File}: recording {entry.Text}",
                 JournalEntry.TrackSource => $"{entry.File}: now recording {entry.Text}",
-                JournalEntry.TrackEnd => $"{entry.File}: stopped{Alignment(entry)}",
+                JournalEntry.TrackEnd => $"{entry.File}: stopped",
                 JournalEntry.Event => entry.Text,
                 JournalEntry.ShareEnd => $"{entry.File}: back to the meeting window",
                 _ => null,
@@ -713,8 +720,7 @@ static class RecordingFinisher
                 PeakDb = track.Stats?.PeakDb,
                 Silent = track.Stats?.SoundSeconds is { } seconds ? seconds < 1 : (bool?)null,
                 MinutePeaksDb = track.Stats?.MinutePeaks,
-                FilledSeconds = track.Stats?.FilledSeconds,
-                DroppedSeconds = track.Stats?.DroppedSeconds,
+                Alignment = track.Alignments,
                 Sources = track.Sources.Select(e => new { AtSeconds = At(e.Qpc), Text = e.Text, Details = e.Details }).ToList(),
             });
         var manifest = new
@@ -769,21 +775,6 @@ static class RecordingFinisher
 
     private static string Duration(TimeSpan time) => time.TotalHours >= 1 ? $"{(int)time.TotalHours} h {time.Minutes} min {time.Seconds} s"
         : time.TotalMinutes >= 1 ? $"{time.Minutes} min {time.Seconds} s" : $"{time.TotalSeconds:0} s";
-
-    /// <summary>
-    /// What it took to keep a track's file on the recording's clock, for its line in the timeline: a source that
-    /// delivers nothing for a while (nothing playing, a device busy) leaves a pause to fill, and one that delivers
-    /// audio for a moment the file has passed has that much dropped. Empty when nothing was needed.
-    /// </summary>
-    private static string Alignment(JournalEntry entry)
-    {
-        var parts = new List<string>();
-        if (entry.FilledSeconds is { } filled)
-            parts.Add($"{filled:0.##} s of silence filled in for pauses");
-        if (entry.DroppedSeconds is { } dropped)
-            parts.Add($"{dropped:0.##} s dropped as late");
-        return parts.Count == 0 ? "" : $" (to keep it on the clock: {string.Join(", ", parts)})";
-    }
 
     /// <summary>A bullet and, indented under it, one sub-bullet per further fact.</summary>
     private static void Bullets(StringBuilder text, string line, List<string>? details)

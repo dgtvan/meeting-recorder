@@ -26,6 +26,9 @@ sealed class AudioTrack
     // How far a file may sit from the recording's clock before a packet's timestamp is honoured by filling silence or
     // dropping audio: short enough that the files mix without an audible echo, long enough to ignore packet jitter.
     private const double MaxOffsetSeconds = 0.05;
+    // A source that delivers nothing for longer than this has paused (nothing playing, a device switch), rather than
+    // being late with a packet; it is all a packet without a timestamp can be judged by.
+    private const double MaxPauseSeconds = 0.2;
     private const int BufferMilliseconds = 200;
     // -60 dBFS: quieter than this is background hiss, not sound.
     private const int SoundThreshold = 33;
@@ -40,12 +43,11 @@ sealed class AudioTrack
     private byte[] _scratch = [];
     private long _startTicks;
     private long _framesWritten;
-    private long _filledFrames;
-    private long _droppedFrames;
     private long _soundFrames;
     private int _peak;
     private long? _stopTicks;
     private bool _closed;
+    private readonly AlignmentLog _alignment = new();
 
     /// <summary>"system" or "mic": which track of the recording this is.</summary>
     public string Kind { get; }
@@ -142,17 +144,25 @@ sealed class AudioTrack
         return _stopped.Task;
     }
 
-    /// <summary>
-    /// Seconds that had sound in them, the loudest moment (dBFS), the loudest moment of each minute, and what it took
-    /// to keep the file on the recording's clock: seconds of silence filled in for pauses and seconds of audio dropped
-    /// because it arrived for a moment the file had passed.
-    /// </summary>
-    public (double SoundSeconds, double PeakDb, double[] MinutePeaks, double FilledSeconds, double DroppedSeconds) Statistics()
+    /// <summary>Seconds that had sound in them, the loudest moment (dBFS) and the loudest moment of each minute.</summary>
+    public (double SoundSeconds, double PeakDb, double[] MinutePeaks) Statistics()
     {
         lock (_sync)
-            return (_soundFrames / (double)SampleRate, Decibels(_peak), _minutePeaks.Select(Decibels).ToArray(),
-                _filledFrames / (double)SampleRate, _droppedFrames / (double)SampleRate);
+            return (_soundFrames / (double)SampleRate, Decibels(_peak), _minutePeaks.Select(Decibels).ToArray());
     }
+
+    /// <summary>
+    /// How the file sits on the recording's clock and everything that was needed to keep it there, so a recording
+    /// whose sound turns out to be out of step can be worked out afterwards from the log alone.
+    /// </summary>
+    public AlignmentReport Alignment()
+    {
+        lock (_sync)
+            return _alignment.Report(FileName, _framesWritten - FramesAt(_stopTicks ?? RecordingJournal.Now()), Where(_framesWritten));
+    }
+
+    /// <summary>Where a frame count falls on the recording's clock, e.g. "00:04:13.2", for a message.</summary>
+    private static string Where(long frames) => TimeSpan.FromSeconds(frames / (double)SampleRate).ToString(@"hh\:mm\:ss\.f");
 
     private static double Decibels(int peak) => peak <= 0 ? -100 : Math.Round(20 * Math.Log10(peak / 32768.0), 1);
 
@@ -167,23 +177,43 @@ sealed class AudioTrack
             int frames = buffer.Length / segment.SourceBytesPerFrame;
             // The packet holds audio from before now, so its first frame can be no later than this.
             long latestStart = FramesAt(RecordingJournal.Now()) - frames;
-            long expectedStart = qpcPosition > 0 && (flags & AudioClientBufferFlags.TimestampError) == 0
-                ? Math.Min(FramesAt(qpcPosition), latestStart)
-                : latestStart;
+            bool timestamped = qpcPosition > 0 && (flags & AudioClientBufferFlags.TimestampError) == 0;
+            _alignment.Packet(timestamped, (flags & AudioClientBufferFlags.DataDiscontinuity) != 0,
+                (flags & AudioClientBufferFlags.Silent) != 0, frames);
+
+            long expectedStart;
+            if (timestamped)
+            {
+                expectedStart = FramesAt(qpcPosition);
+                if (expectedStart > latestStart)
+                {
+                    _alignment.Clamped(expectedStart - latestStart, Where(expectedStart));
+                    expectedStart = latestStart;
+                }
+            }
+            else
+            {
+                // Without a timestamp only the clock can say where the audio belongs, and it can be trusted for a
+                // long pause but not for the exact moment: it moves with how late the packet was delivered, so
+                // following it closely would drop audio from a burst that arrives after a stall. The packet goes
+                // straight after the audio before it unless the source clearly paused.
+                expectedStart = latestStart - _framesWritten > SampleRate * MaxPauseSeconds ? latestStart : _framesWritten;
+            }
+
             long offset = expectedStart - _framesWritten;
             int dropped = 0;
             if (offset > SampleRate * MaxOffsetSeconds)
             {
+                _alignment.Filled(offset, Where(_framesWritten));
                 WriteSilence(offset);
-                _filledFrames += offset;
             }
             else if (-offset > SampleRate * MaxOffsetSeconds)
             {
                 // The file has run ahead of the clock, e.g. silence was filled for a packet that arrived late. This
                 // packet's audio belongs where the file already is, so the overlap goes rather than the alignment.
                 dropped = (int)Math.Min(frames, -offset);
+                _alignment.Dropped(-offset, dropped, Where(_framesWritten));
                 frames -= dropped;
-                _droppedFrames += dropped;
                 if (frames == 0)
                     return;
             }
@@ -292,6 +322,78 @@ sealed class AudioTrack
 
     private long FramesAt(long ticks) => (ticks - _startTicks) * SampleRate / TimeSpan.TicksPerSecond;
 
+    /// <summary>
+    /// Counts what the capture delivered and every correction made to keep the file on the recording's clock, so the
+    /// log says not only that a file moved but when, by how much and which way. Touched under the track's lock.
+    /// </summary>
+    private sealed class AlignmentLog
+    {
+        private long _packets;
+        private long _untimedPackets;
+        private long _discontinuities;
+        private long _silentPackets;
+        private long _frames;
+        private long _filledFrames;
+        private int _fills;
+        private long _largestFill;
+        private string? _largestFillAt;
+        private long _droppedFrames;
+        private int _drops;
+        private long _largestOverlap;
+        private string? _largestOverlapAt;
+        private int _clamps;
+        private long _largestClamp;
+        private string? _largestClampAt;
+
+        public void Packet(bool timestamped, bool discontinuity, bool silent, int frames)
+        {
+            _packets++;
+            _frames += frames;
+            if (!timestamped)
+                _untimedPackets++;
+            if (discontinuity)
+                _discontinuities++;
+            if (silent)
+                _silentPackets++;
+        }
+
+        /// <summary>A timestamp that claimed audio from after now, by <paramref name="frames"/> frames.</summary>
+        public void Clamped(long frames, string at)
+        {
+            _clamps++;
+            if (frames > _largestClamp)
+                (_largestClamp, _largestClampAt) = (frames, at);
+        }
+
+        public void Filled(long frames, string at)
+        {
+            _fills++;
+            _filledFrames += frames;
+            if (frames > _largestFill)
+                (_largestFill, _largestFillAt) = (frames, at);
+        }
+
+        /// <summary>
+        /// Audio that arrived for a moment the file had passed: <paramref name="overlap"/> frames behind the file,
+        /// of which <paramref name="dropped"/> were in the packet and dropped.
+        /// </summary>
+        public void Dropped(long overlap, long dropped, string at)
+        {
+            _drops++;
+            _droppedFrames += dropped;
+            if (overlap > _largestOverlap)
+                (_largestOverlap, _largestOverlapAt) = (overlap, at);
+        }
+
+        public AlignmentReport Report(string file, long offsetFrames, string at) => new(
+            file, Seconds(offsetFrames), at, _packets, _untimedPackets, _discontinuities, _silentPackets, Seconds(_frames),
+            Seconds(_filledFrames), _fills, Seconds(_largestFill), _largestFillAt,
+            Seconds(_droppedFrames), _drops, Seconds(_largestOverlap), _largestOverlapAt,
+            _clamps, Seconds(_largestClamp), _largestClampAt);
+
+        private static double Seconds(long frames) => Math.Round(frames / (double)SampleRate, 3);
+    }
+
     private sealed class Segment(WasapiRecorder capture)
     {
         public WasapiRecorder Capture { get; } = capture;
@@ -312,5 +414,49 @@ sealed class AudioTrack
             Capture.StopRecording();
             return true;
         }
+    }
+}
+
+/// <summary>
+/// Where a track's file sits on the recording's clock and what it took to keep it there. A positive
+/// <paramref name="OffsetSeconds"/> means the file holds more audio than the clock has passed, so its sound plays
+/// that much later than it happened; a negative one means it holds less.
+/// </summary>
+/// <param name="At">Where the file had reached when this was taken, on the recording's clock.</param>
+/// <param name="OverlapSeconds">The furthest behind the file a packet's audio arrived, dropped to keep the rest in step.</param>
+/// <param name="ClampedSeconds">The furthest into the future a timestamp claimed its audio was captured.</param>
+sealed record AlignmentReport(
+    string File, double OffsetSeconds, string At, long Packets, long UntimedPackets, long Discontinuities, long SilentPackets,
+    double RecordedSeconds, double FilledSeconds, int Fills, double LargestFillSeconds, string? LargestFillAt,
+    double DroppedSeconds, int Drops, double OverlapSeconds, string? OverlapAt,
+    int ClampedTimestamps, double ClampedSeconds, string? ClampedAt)
+{
+    /// <summary>True when nothing had to be corrected and the file is where the clock says it should be.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool Clean => Fills == 0 && Drops == 0 && ClampedTimestamps == 0 && Discontinuities == 0 && UntimedPackets == 0;
+
+    /// <summary>One line per fact, for the log, the journal and README.md.</summary>
+    public List<string> Describe()
+    {
+        if (Packets == 0)
+            return ["Nothing has been delivered from this source; the file is filled with silence when the recording stops"];
+        var lines = new List<string> { $"{OffsetSeconds:+0.###;-0.###;0} s from the recording's clock at {At}" };
+        if (Fills > 0)
+            lines.Add($"Filled {FilledSeconds:0.###} s of silence for the {Fills} pause(s) when the source delivered nothing, "
+                + $"longest {LargestFillSeconds:0.###} s from {LargestFillAt}");
+        if (Drops > 0)
+            lines.Add($"Dropped {DroppedSeconds:0.###} s of audio that arrived for a moment the file had passed, {Drops} time(s), "
+                + $"furthest behind {OverlapSeconds:0.###} s at {OverlapAt}");
+        if (ClampedTimestamps > 0)
+            lines.Add($"Held back {ClampedTimestamps} timestamp(s) that claimed audio from the future, "
+                + $"up to {ClampedSeconds:0.###} s ahead at {ClampedAt}");
+        if (Discontinuities > 0)
+            lines.Add($"Windows flagged {Discontinuities} packet(s) as not following the one before "
+                + "(expected after a pause; otherwise audio was lost before it reached us)");
+        if (UntimedPackets > 0)
+            lines.Add($"{UntimedPackets} of {Packets} packets had no usable timestamp and were placed after the audio before them");
+        if (SilentPackets > 0)
+            lines.Add($"{SilentPackets} of {Packets} packets were marked silent");
+        return lines;
     }
 }

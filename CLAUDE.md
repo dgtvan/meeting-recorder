@@ -29,7 +29,11 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
   output device (one part file each, mixed by the finisher), mic = the one in use (`AudioDevices.ChooseMicrophone`),
   followed. Don't go back to process loopback: it misses Teams call audio entirely.
   Anything about devices or sources goes to the journal (README.md) and `audio.log`, so a recording can be
-  investigated afterwards.
+  investigated afterwards. Each file is held on the recording's clock within 50 ms (`AudioTrack`: a timestamp is
+  never honoured past now, a pause is filled with silence, audio for a moment the file has passed is dropped) --
+  files that drift apart play as an echo in the mixed video sound. Where each file sits on the clock and every
+  correction made goes to `audio.log` once a minute and to README.md/`recording.json` (`AlignmentReport`) at the
+  end; a file ending more than 0.25 s off raises a warning.
 - Auto-record is per meeting app: each `IMeetingApp` in `MeetingApps.All` gets an `AutoRecorder` (call detection,
   per-call folder, tidy-up, `meetings.log`). App-specific detection belongs in the `IMeetingApp`, not in the tray.
 - Screen share: `IMeetingApp.FindShare` (Teams: its `ScreenBorderWindow`) finds what is shared; `AutoRecorder` records

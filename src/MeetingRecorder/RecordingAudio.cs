@@ -22,6 +22,11 @@ sealed class RecordingAudio
     private const int MaxSystemParts = 8;
 
     private const int CheckMilliseconds = 2000;
+    // How often each file's place on the recording's clock goes to the audio log while recording.
+    private const int AlignmentLogSeconds = 60;
+    // A file this far from the recording's clock is worth telling the user about: the files are then out of step with
+    // each other by enough to hear.
+    private const double OutOfStepSeconds = 0.25;
 
     private readonly SynchronizationContext _ui;
     private readonly AppSettings _settings;
@@ -41,6 +46,7 @@ sealed class RecordingAudio
     private string? _pendingMicrophoneId;
     private bool _followMicrophone;
     private bool _stopping;
+    private int _ticks;
 
     /// <summary>Something the user must act on, e.g. a source that can't be recorded.</summary>
     public event Action<string>? Warning;
@@ -232,6 +238,8 @@ sealed class RecordingAudio
     {
         if (_stopping)
             return;
+        if (++_ticks % (AlignmentLogSeconds * 1000 / CheckMilliseconds) == 0)
+            LogAlignment();
         foreach (var track in _reopening.ToList())
             OpenLoopback(track);
         if (_settings.SystemAudioDeviceId != AppSettings.DisabledDevice)
@@ -326,30 +334,36 @@ sealed class RecordingAudio
         await Task.WhenAll(_tracks.Select(t => t.StopAsync()));
         foreach (var track in _tracks)
         {
-            var (sound, peak, minutes, filled, dropped) = track.Statistics();
+            var (sound, peak, minutes) = track.Statistics();
+            var alignment = track.Alignment();
             _journal.Write(new JournalEntry
             {
                 Kind = JournalEntry.TrackEnd, Track = track.Kind, File = track.FileName,
                 SoundSeconds = Math.Round(sound, 1), PeakDb = peak, MinutePeaks = minutes,
-                FilledSeconds = Round(filled), DroppedSeconds = Round(dropped),
+                Alignment = alignment, Details = alignment.Clean ? null : alignment.Describe(),
             });
-            Log?.Invoke($"{track.Label} ({track.FileName}) ended: sound in {sound:0} s, loudest {peak:0.0} dBFS."
-                + Alignment(filled, dropped));
+            Log?.Invoke($"{track.Label} ({track.FileName}) ended: sound in {sound:0} s, loudest {peak:0.0} dBFS, "
+                + $"{alignment.RecordedSeconds:0.##} s of audio in {alignment.Packets} packets."
+                + Environment.NewLine + AudioDevices.Indent(alignment.Describe()));
+            // The sound of the recording is only as good as its files lining up; say so rather than leave it to be
+            // noticed as an echo in the video's sound.
+            if (Math.Abs(alignment.OffsetSeconds) > OutOfStepSeconds)
+                Warning?.Invoke($"{track.Label} ({track.FileName}) ended {alignment.OffsetSeconds:+0.##;-0.##} s from the "
+                    + "recording's clock, so its sound may be out of step with the other files. The recording's README.md "
+                    + "and audio.log say what happened.");
         }
         foreach (var device in _devices)
             device.Dispose();
     }
 
-    private static double? Round(double seconds) => seconds > 0 ? Math.Round(seconds, 2) : null;
-
-    /// <summary>What it took to keep a file on the recording's clock, for the log; empty when nothing was needed.</summary>
-    private static string Alignment(double filled, double dropped)
+    /// <summary>
+    /// Writes where each file sits on the recording's clock to the audio log, so a recording whose sound turns out to
+    /// be out of step shows when a file started to move and what was done about it, not just the totals at the end.
+    /// </summary>
+    private void LogAlignment()
     {
-        var parts = new List<string>();
-        if (filled > 0)
-            parts.Add($"{filled:0.##} s of silence filled in for pauses");
-        if (dropped > 0)
-            parts.Add($"{dropped:0.##} s dropped as late");
-        return parts.Count == 0 ? "" : $" To keep it on the recording's clock: {string.Join(", ", parts)}.";
+        foreach (var track in _tracks)
+            Log?.Invoke($"{track.Label} ({track.FileName}) so far:"
+                + Environment.NewLine + AudioDevices.Indent(track.Alignment().Describe()));
     }
 }
