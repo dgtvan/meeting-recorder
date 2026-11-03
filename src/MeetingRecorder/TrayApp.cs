@@ -168,7 +168,7 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
 
         try
         {
-            AudioLog($"Meeting Recorder started. Audio devices:\n{AudioDevices.Describe()}");
+            AudioLog($"Meeting Recorder started. Audio devices:{Environment.NewLine}{AudioDevices.Indent(AudioDevices.Describe())}");
             _deviceWatcher = new AudioDeviceWatcher();
             _deviceWatcher.Changed += AudioLog;
         }

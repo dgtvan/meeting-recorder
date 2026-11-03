@@ -36,6 +36,8 @@ sealed record JournalEntry
     public string? File { get; set; }
     public string? Track { get; init; }
     public string? Text { get; init; }
+    /// <summary>Further facts about this entry, one per line, shown as sub-bullets under <see cref="Text"/>.</summary>
+    public List<string>? Details { get; init; }
     public string? Target { get; init; }
     public bool? Auto { get; init; }
     public string? App { get; init; }

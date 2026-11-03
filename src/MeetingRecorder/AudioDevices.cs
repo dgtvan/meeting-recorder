@@ -67,12 +67,13 @@ static class AudioDevices
     }
 
     /// <summary>One line per microphone in use: which apps have it open, e.g. for the log when the choice changes.</summary>
-    public static string DescribeMicrophoneUse()
+    public static List<string> DescribeMicrophoneUse()
     {
         using var enumerator = new MMDeviceEnumerator();
         var users = MicrophoneUsers(enumerator);
-        return users.Count == 0 ? "no app has a microphone open"
-            : string.Join("; ", users.GroupBy(u => u.DeviceName).Select(g => $"{g.Key}: {string.Join(", ", g.Select(u => u.Process))}"));
+        return users.GroupBy(u => u.DeviceName)
+            .Select(g => $"{g.Key}: {string.Join(", ", g.Select(u => u.Process))}")
+            .ToList();
     }
 
     /// <summary>The id and name of every connected and enabled output device, the Windows default for apps first.</summary>
@@ -152,9 +153,9 @@ static class AudioDevices
     /// Every connected or unplugged audio device with its state and default roles, and which apps are playing or
     /// recording on each: the starting point for working out where a meeting's sound went.
     /// </summary>
-    public static string Describe()
+    public static List<string> Describe()
     {
-        var text = new StringBuilder();
+        var lines = new List<string>();
         using var enumerator = new MMDeviceEnumerator();
         foreach (var flow in new[] { DataFlow.Render, DataFlow.Capture })
         {
@@ -172,21 +173,24 @@ static class AudioDevices
                 using (device)
                 {
                     string roles = defaults.TryGetValue(device.ID, out var r) ? $", default for {string.Join(" and ", r)}" : "";
-                    text.Append($"  {FlowName(flow)} {device.FriendlyName}: {StateName(device.State)}{roles}");
+                    var line = new StringBuilder($"{FlowName(flow)} {device.FriendlyName}: {StateName(device.State)}{roles}");
                     if (device.State == DeviceState.Active)
                     {
                         if (flow == DataFlow.Capture && DescribeLevel(device.ID) is { Length: > 0 } level)
-                            text.Append($", {level}");
+                            line.Append($", {level}");
                         var processes = ActiveSessionProcesses(device);
                         if (processes.Count > 0)
-                            text.Append($"; in use by {string.Join(", ", processes)}");
+                            line.Append($"; in use by {string.Join(", ", processes)}");
                     }
-                    text.AppendLine();
+                    lines.Add(line.ToString());
                 }
             }
         }
-        return text.ToString().TrimEnd();
+        return lines;
     }
+
+    /// <summary>Detail lines as one indented block, under the line they belong to in a log.</summary>
+    public static string Indent(IEnumerable<string> lines) => string.Join(Environment.NewLine, lines.Select(l => "  " + l));
 
     public static string FlowName(DataFlow flow) => flow switch
     {

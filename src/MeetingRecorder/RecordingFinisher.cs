@@ -595,10 +595,8 @@ static class RecordingFinisher
             text.AppendLine("Recorded from the microphone the recorded program uses, else one another app uses, else the Windows default; "
                 + "it follows a change during the recording (unless one is chosen in the tray menu).");
             text.AppendLine();
-            text.AppendLine("| From | Device and why |");
-            text.AppendLine("|---|---|");
             foreach (var source in microphone.Sources)
-                text.AppendLine($"| {At(source.Qpc)} | {Cell(source.Text ?? "")} |");
+                Bullets(text, $"{At(source.Qpc)} — {Line(source.Text ?? "")}", source.Details);
         }
 
         text.AppendLine();
@@ -632,7 +630,7 @@ static class RecordingFinisher
                 _ => null,
             };
             if (line != null)
-                text.AppendLine($"- {At(entry.Qpc)} ({entry.Time:HH:mm:ss}) {line}");
+                Bullets(text, $"{At(entry.Qpc)} ({entry.Time:HH:mm:ss}) {Line(line)}", entry.Details);
         }
 
         if (notes.Count > 0)
@@ -641,7 +639,7 @@ static class RecordingFinisher
             text.AppendLine("## Notes");
             text.AppendLine();
             foreach (string note in notes)
-                text.AppendLine($"- {note}");
+                Bullets(text, Line(note), null);
         }
         return text.ToString();
     }
@@ -707,7 +705,7 @@ static class RecordingFinisher
                 PeakDb = track.Stats?.PeakDb,
                 Silent = track.Stats?.SoundSeconds is { } seconds ? seconds < 1 : (bool?)null,
                 MinutePeaksDb = track.Stats?.MinutePeaks,
-                Sources = track.Sources.Select(e => new { AtSeconds = At(e.Qpc), Text = e.Text }).ToList(),
+                Sources = track.Sources.Select(e => new { AtSeconds = At(e.Qpc), Text = e.Text, Details = e.Details }).ToList(),
             });
         var manifest = new
         {
@@ -762,7 +760,18 @@ static class RecordingFinisher
     private static string Duration(TimeSpan time) => time.TotalHours >= 1 ? $"{(int)time.TotalHours} h {time.Minutes} min {time.Seconds} s"
         : time.TotalMinutes >= 1 ? $"{time.Minutes} min {time.Seconds} s" : $"{time.TotalSeconds:0} s";
 
-    private static string Cell(string text) => text.ReplaceLineEndings(" ").Replace("|", "\\|");
+    /// <summary>A bullet and, indented under it, one sub-bullet per further fact.</summary>
+    private static void Bullets(StringBuilder text, string line, List<string>? details)
+    {
+        text.AppendLine($"- {line}");
+        foreach (string detail in details ?? [])
+            text.AppendLine($"  - {Line(detail)}");
+    }
+
+    /// <summary>Text on one line, so a multi-line description stays inside its bullet or cell.</summary>
+    private static string Line(string text) => text.ReplaceLineEndings(" ");
+
+    private static string Cell(string text) => Line(text).Replace("|", "\\|");
 
     private static void TryDelete(string path)
     {

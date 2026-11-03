@@ -21,7 +21,7 @@ static class Program
         {
             // Diagnostic: every audio device, which apps use it, and which microphone a recording would use now.
             // Captures nothing and needs no data folder.
-            Console.Out.WriteLine(AudioDevices.Describe());
+            Console.Out.WriteLine(string.Join(Environment.NewLine, AudioDevices.Describe()));
             var choice = AudioDevices.ChooseMicrophone(null, null);
             Console.Out.WriteLine(choice == null ? "microphone none" : $"microphone {choice.DeviceName} ({choice.Reason})");
             return 0;

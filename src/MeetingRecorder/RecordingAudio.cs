@@ -77,7 +77,7 @@ sealed class RecordingAudio
         {
             Log?.Invoke($"Device changes are not watched: {ex.Message}");
         }
-        Record(null, JournalEntry.Event, $"Audio devices at the start:\n{AudioDevices.Describe()}");
+        Record(null, JournalEntry.Event, "Audio devices at the start:", AudioDevices.Describe());
 
         var loopbacks = new List<AudioTrack>();
         if (_settings.SystemAudioDeviceId != AppSettings.DisabledDevice)
@@ -95,7 +95,7 @@ sealed class RecordingAudio
             AddTrack(track);
         foreach (var track in loopbacks)
         {
-            Record(track, JournalEntry.TrackStart, SystemSource(track), _start);
+            Record(track, JournalEntry.TrackStart, SystemSource(track), qpc: _start);
             OpenLoopback(track);
         }
         if (_microphone != null)
@@ -204,7 +204,7 @@ sealed class RecordingAudio
         _followMicrophone = true;
         if (AudioDevices.ChooseMicrophone(_app, null) is not { } choice || !UseMicrophone(choice, start))
         {
-            Record(_microphone!, JournalEntry.TrackStart, "nothing yet: no microphone could be opened", start);
+            Record(_microphone!, JournalEntry.TrackStart, "nothing yet: no microphone could be opened", qpc: start);
             Warning?.Invoke("Microphone is not being recorded: no microphone could be opened. It is recorded once one can be.");
         }
     }
@@ -277,20 +277,22 @@ sealed class RecordingAudio
     private bool UseMicrophone(MicrophoneChoice choice, long? startedAt)
     {
         var track = _microphone!;
-        string level = AudioDevices.DescribeLevel(choice.DeviceId);
-        string source = $"{choice.DeviceName} ({choice.Reason}{(level.Length > 0 ? "; " + level : "")})";
+        var details = new List<string> { $"Chosen because: {choice.Reason}" };
+        if (AudioDevices.DescribeLevel(choice.DeviceId) is { Length: > 0 } level)
+            details.Add($"Level: {level}");
+        var inUse = AudioDevices.DescribeMicrophoneUse();
+        details.AddRange(inUse.Count == 0 ? ["Microphones in use: none"] : inUse.Select(u => $"Microphones in use: {u}"));
         try
         {
             using var enumerator = new MMDeviceEnumerator();
             var device = enumerator.GetDevice(choice.DeviceId);
             _devices.Add(device);
-            track.Use(track.OpenDevice(device), source);
+            track.Use(track.OpenDevice(device), choice.DeviceName);
             _microphoneId = choice.DeviceId;
-            string text = source + $". Microphones in use: {AudioDevices.DescribeMicrophoneUse()}";
             if (startedAt is { } start)
-                Record(track, JournalEntry.TrackStart, text, start);
+                Record(track, JournalEntry.TrackStart, choice.DeviceName, details, start);
             else
-                Record(track, JournalEntry.TrackSource, text);
+                Record(track, JournalEntry.TrackSource, choice.DeviceName, details);
             return true;
         }
         catch (Exception ex)
@@ -300,9 +302,9 @@ sealed class RecordingAudio
         }
     }
 
-    private void Record(AudioTrack? track, string kind, string text, long? qpc = null)
+    private void Record(AudioTrack? track, string kind, string text, List<string>? details = null, long? qpc = null)
     {
-        var entry = new JournalEntry { Kind = kind, Track = track?.Kind, File = track?.FileName, Text = text };
+        var entry = new JournalEntry { Kind = kind, Track = track?.Kind, File = track?.FileName, Text = text, Details = details };
         _journal.Write(qpc is { } at ? entry with { Qpc = at } : entry);
         string prefix = kind switch
         {
@@ -310,7 +312,7 @@ sealed class RecordingAudio
             JournalEntry.TrackSource => $"{track!.Label}: now recording ",
             _ => "",
         };
-        Log?.Invoke(prefix + text);
+        Log?.Invoke(prefix + text + (details is { Count: > 0 } ? Environment.NewLine + AudioDevices.Indent(details) : ""));
     }
 
     /// <summary>Stops every track; completes once the WAV files are closed.</summary>
