@@ -6,18 +6,26 @@ namespace MeetingRecorder;
 
 /// <summary>
 /// Records one audio file (16-bit PCM WAV, 48 kHz) from a source that can be replaced while recording, e.g. when the
-/// microphone in use changes. The file keeps one timeline: gaps (a source switch, nothing playing) are filled with
-/// silence by the packet timestamps, so it stays in sync with the video.
+/// microphone in use changes. The file keeps one timeline: every packet is written where its timestamp puts it on the
+/// recording's clock, so the file stays in sync with the other files and with the video. A pause (a source switch,
+/// nothing playing) is filled with silence; audio that would land before what is already written is dropped, so the
+/// file can never run ahead of the clock and drift away from the other files.
 /// </summary>
 /// <remarks>
 /// WAV costs no encoding CPU while recording and survives a crash; <see cref="RecordingFinisher"/> converts it to AAC.
 /// Loopback capture delivers no packets while nothing is playing, which would otherwise shorten the file.
+/// Appending every packet instead would let a file drift: a timestamp that runs ahead of the clock (loopback audio
+/// can be stamped with the moment it will be played, which moves when the app re-buffers) fills silence that is never
+/// taken back, and everything after it sits too late in the file for good. Measured on a Teams call, that put the
+/// system audio 0.6 s behind the microphone, and the mixed video sound played the two as an echo.
 /// </remarks>
 sealed class AudioTrack
 {
     public const int SampleRate = 48000;
     private static readonly Guid IeeeFloatSubFormat = new("00000003-0000-0010-8000-00aa00389b71");
-    private const double MaxGapSeconds = 0.2;
+    // How far a file may sit from the recording's clock before a packet's timestamp is honoured by filling silence or
+    // dropping audio: short enough that the files mix without an audible echo, long enough to ignore packet jitter.
+    private const double MaxOffsetSeconds = 0.05;
     private const int BufferMilliseconds = 200;
     // -60 dBFS: quieter than this is background hiss, not sound.
     private const int SoundThreshold = 33;
@@ -32,6 +40,8 @@ sealed class AudioTrack
     private byte[] _scratch = [];
     private long _startTicks;
     private long _framesWritten;
+    private long _filledFrames;
+    private long _droppedFrames;
     private long _soundFrames;
     private int _peak;
     private long? _stopTicks;
@@ -132,11 +142,16 @@ sealed class AudioTrack
         return _stopped.Task;
     }
 
-    /// <summary>Seconds that had sound in them, the loudest moment (dBFS) and the loudest moment of each minute.</summary>
-    public (double SoundSeconds, double PeakDb, double[] MinutePeaks) Statistics()
+    /// <summary>
+    /// Seconds that had sound in them, the loudest moment (dBFS), the loudest moment of each minute, and what it took
+    /// to keep the file on the recording's clock: seconds of silence filled in for pauses and seconds of audio dropped
+    /// because it arrived for a moment the file had passed.
+    /// </summary>
+    public (double SoundSeconds, double PeakDb, double[] MinutePeaks, double FilledSeconds, double DroppedSeconds) Statistics()
     {
         lock (_sync)
-            return (_soundFrames / (double)SampleRate, Decibels(_peak), _minutePeaks.Select(Decibels).ToArray());
+            return (_soundFrames / (double)SampleRate, Decibels(_peak), _minutePeaks.Select(Decibels).ToArray(),
+                _filledFrames / (double)SampleRate, _droppedFrames / (double)SampleRate);
     }
 
     private static double Decibels(int peak) => peak <= 0 ? -100 : Math.Round(20 * Math.Log10(peak / 32768.0), 1);
@@ -150,11 +165,28 @@ sealed class AudioTrack
                 return;
 
             int frames = buffer.Length / segment.SourceBytesPerFrame;
+            // The packet holds audio from before now, so its first frame can be no later than this.
+            long latestStart = FramesAt(RecordingJournal.Now()) - frames;
             long expectedStart = qpcPosition > 0 && (flags & AudioClientBufferFlags.TimestampError) == 0
-                ? FramesAt(qpcPosition)
-                : FramesAt(RecordingJournal.Now()) - frames;
-            if (expectedStart - _framesWritten > SampleRate * MaxGapSeconds)
-                WriteSilence(expectedStart - _framesWritten);
+                ? Math.Min(FramesAt(qpcPosition), latestStart)
+                : latestStart;
+            long offset = expectedStart - _framesWritten;
+            int dropped = 0;
+            if (offset > SampleRate * MaxOffsetSeconds)
+            {
+                WriteSilence(offset);
+                _filledFrames += offset;
+            }
+            else if (-offset > SampleRate * MaxOffsetSeconds)
+            {
+                // The file has run ahead of the clock, e.g. silence was filled for a packet that arrived late. This
+                // packet's audio belongs where the file already is, so the overlap goes rather than the alignment.
+                dropped = (int)Math.Min(frames, -offset);
+                frames -= dropped;
+                _droppedFrames += dropped;
+                if (frames == 0)
+                    return;
+            }
 
             if ((flags & AudioClientBufferFlags.Silent) != 0)
             {
@@ -162,13 +194,13 @@ sealed class AudioTrack
                 return;
             }
 
-            ReadOnlySpan<byte> pcm = buffer;
+            ReadOnlySpan<byte> pcm = buffer[(dropped * segment.SourceBytesPerFrame)..];
             if (segment.ConvertFloat)
             {
-                int samples = buffer.Length / sizeof(float);
+                int samples = pcm.Length / sizeof(float);
                 if (_scratch.Length < samples * sizeof(short))
                     _scratch = new byte[samples * sizeof(short)];
-                ReadOnlySpan<float> input = MemoryMarshal.Cast<byte, float>(buffer);
+                ReadOnlySpan<float> input = MemoryMarshal.Cast<byte, float>(pcm);
                 Span<short> output = MemoryMarshal.Cast<byte, short>(_scratch.AsSpan(0, samples * sizeof(short)));
                 for (int i = 0; i < input.Length; i++)
                     output[i] = (short)(Math.Clamp(input[i], -1f, 1f) * short.MaxValue);

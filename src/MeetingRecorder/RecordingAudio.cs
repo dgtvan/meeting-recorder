@@ -326,15 +326,30 @@ sealed class RecordingAudio
         await Task.WhenAll(_tracks.Select(t => t.StopAsync()));
         foreach (var track in _tracks)
         {
-            var (sound, peak, minutes) = track.Statistics();
+            var (sound, peak, minutes, filled, dropped) = track.Statistics();
             _journal.Write(new JournalEntry
             {
                 Kind = JournalEntry.TrackEnd, Track = track.Kind, File = track.FileName,
                 SoundSeconds = Math.Round(sound, 1), PeakDb = peak, MinutePeaks = minutes,
+                FilledSeconds = Round(filled), DroppedSeconds = Round(dropped),
             });
-            Log?.Invoke($"{track.Label} ({track.FileName}) ended: sound in {sound:0} s, loudest {peak:0.0} dBFS.");
+            Log?.Invoke($"{track.Label} ({track.FileName}) ended: sound in {sound:0} s, loudest {peak:0.0} dBFS."
+                + Alignment(filled, dropped));
         }
         foreach (var device in _devices)
             device.Dispose();
+    }
+
+    private static double? Round(double seconds) => seconds > 0 ? Math.Round(seconds, 2) : null;
+
+    /// <summary>What it took to keep a file on the recording's clock, for the log; empty when nothing was needed.</summary>
+    private static string Alignment(double filled, double dropped)
+    {
+        var parts = new List<string>();
+        if (filled > 0)
+            parts.Add($"{filled:0.##} s of silence filled in for pauses");
+        if (dropped > 0)
+            parts.Add($"{dropped:0.##} s dropped as late");
+        return parts.Count == 0 ? "" : $" To keep it on the recording's clock: {string.Join(", ", parts)}.";
     }
 }

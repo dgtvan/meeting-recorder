@@ -45,6 +45,10 @@ sealed record JournalEntry
     public double? PeakDb { get; init; }
     /// <summary>The loudest moment of each minute in dBFS, -100 for a silent minute.</summary>
     public double[]? MinutePeaks { get; init; }
+    /// <summary>Seconds of silence written where a track's source delivered nothing, to keep the file on the clock.</summary>
+    public double? FilledSeconds { get; init; }
+    /// <summary>Seconds of audio dropped because it arrived for a moment the file had already passed.</summary>
+    public double? DroppedSeconds { get; init; }
     public string? Error { get; init; }
 }
 
