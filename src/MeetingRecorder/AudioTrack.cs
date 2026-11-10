@@ -45,6 +45,7 @@ sealed class AudioTrack
     private long _framesWritten;
     private long _soundFrames;
     private int _peak;
+    private int _peakSince;
     private long? _stopTicks;
     private bool _closed;
     private readonly AlignmentLog _alignment = new();
@@ -152,6 +153,20 @@ sealed class AudioTrack
     }
 
     /// <summary>
+    /// The loudest moment (dBFS) written since the last call, for the per-minute reports; a file that is recording
+    /// silence reads -100 however loud it was before.
+    /// </summary>
+    public double PeakSince()
+    {
+        lock (_sync)
+        {
+            double peak = Decibels(_peakSince);
+            _peakSince = 0;
+            return peak;
+        }
+    }
+
+    /// <summary>
     /// How the file sits on the recording's clock and everything that was needed to keep it there, so a recording
     /// whose sound turns out to be out of step can be worked out afterwards from the log alone.
     /// </summary>
@@ -250,6 +265,7 @@ sealed class AudioTrack
         if (peak > SoundThreshold)
             _soundFrames += frames;
         _peak = Math.Max(_peak, peak);
+        _peakSince = Math.Max(_peakSince, peak);
         int minute = (int)(_framesWritten / (SampleRate * 60L));
         while (_minutePeaks.Count <= minute)
             _minutePeaks.Add(0);

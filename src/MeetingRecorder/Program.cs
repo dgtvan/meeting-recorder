@@ -26,6 +26,12 @@ static class Program
             Console.Out.WriteLine(choice == null ? "microphone none" : $"microphone {choice.DeviceName} ({choice.Reason})");
             return 0;
         }
+        if (args.Length > 0 && args[0] == AudioProbe.Flag)
+        {
+            // Diagnostic: what our loopback capture hears on each output device against what Windows says the device
+            // plays. Captures nothing, writes nothing and needs no data folder.
+            return AudioProbe.Run(args, Console.Out);
+        }
         if (args.Length > 0 && args[0] == MeetingLog.StatusFlag)
         {
             // Diagnostic: what auto-record sees right now, for one meeting app (by id) or all. Captures nothing and

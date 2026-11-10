@@ -24,7 +24,7 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
   A recording runs in a child process (`MeetingRecorder.exe --record ...`) that saves and exits when its stdin closes;
   then a finisher (`--finish <folder> [--auto]`) mixes the sound into the videos, compresses the audio and writes the
   folder's README.md from the recorders' `*.journal.jsonl` files. Finishing counts as saving.
-- Every mode except `--meeting-status` and `--audio-status` needs `--data-dir <folder>` (`AppPaths`); the tray passes it on.
+- Every mode except `--meeting-status`, `--audio-status` and `--audio-probe` needs `--data-dir <folder>` (`AppPaths`); the tray passes it on.
 - Audio files mean the same in every kind of recording (`RecordingAudio`): system = device loopback of every active
   output device (one part file each, mixed by the finisher), mic = the one in use (`AudioDevices.ChooseMicrophone`),
   followed. Don't go back to process loopback: it misses Teams call audio entirely.
@@ -59,6 +59,10 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
   tests use `--record --file <video> --name <n> --data-dir <scratch folder>` instead: it replays a video file through the same encoder settings
   and captures nothing from the screen. `bench/make-test-video.ps1` makes the test video and `bench/bench.ps1`
   measures a run; log results in docs/performance.md. Delete test recordings afterwards.
+- `MeetingRecorder.exe --audio-probe [seconds]` prints, per output device, its mix format, what our loopback capture
+  hears, Windows' meter for the device and each app's session meter, second by second. Use it when system audio is
+  silent to tell a device that played nothing from one whose sound loopback can't hear (the recorder logs the same
+  comparison once a minute, opens the loopback again after one silent minute and warns after the second). It writes nothing and captures nothing.
 - `MeetingRecorder.exe --meeting-status [app id]` prints, per meeting app, whether a call is active and which windows
   auto-record would use, then an `app-window` block per visible window of the app (rect, topmost/owner/capture
   affinity, why it's skipped, and its button names via UI Automation) to tell the meeting window from sharing

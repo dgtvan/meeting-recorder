@@ -111,6 +111,44 @@ static class AudioDevices
         }
     }
 
+    /// <summary>
+    /// Windows' own peak meter for an output device and the loudest app playing on it, as amplitudes from 0 to 1
+    /// (null when they can't be read). Recorded next to what a loopback capture of the same device hears: when the
+    /// meters show sound and the capture is silent, the sound reaches the device by a path loopback can't hear.
+    /// </summary>
+    public static (float Device, AppProcess? App, float AppPeak)? Playing(MMDevice device)
+    {
+        try
+        {
+            float peak = device.AudioMeterInformation.MasterPeakValue;
+            AppProcess? loudest = null;
+            float loudestPeak = 0;
+            var sessions = device.AudioSessionManager.Sessions;
+            for (int i = 0; i < sessions.Count; i++)
+            {
+                using var session = sessions[i];
+                if (session.State != AudioSessionState.AudioSessionStateActive)
+                    continue;
+                uint pid = session.GetProcessID;
+                // Our own loopback capture registers a session on the device; it mirrors the mix, not an app's sound.
+                var process = pid == 0 ? new AppProcess(0, "system sounds") : ProcessTree.Describe(pid);
+                if (process == null || process.Name.Equals(OwnProcessName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                float sessionPeak = session.AudioMeterInformation.MasterPeakValue;
+                if (loudest == null || sessionPeak > loudestPeak)
+                    (loudest, loudestPeak) = (process, sessionPeak);
+            }
+            return (peak, loudest, loudestPeak);
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>An amplitude from 0 to 1 as dBFS, as the recordings and logs report sound levels.</summary>
+    public static double Decibels(float peak) => peak <= 0 ? -100 : Math.Max(-100, 20 * Math.Log10(peak));
+
     private sealed record MicrophoneUser(string DeviceId, string DeviceName, AppProcess Process);
 
     /// <summary>Every app holding an active microphone capture session, other than this app's recorders.</summary>

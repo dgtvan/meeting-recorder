@@ -1,4 +1,5 @@
 using NAudio.CoreAudioApi;
+using NAudio.Wave;
 
 namespace MeetingRecorder;
 
@@ -27,6 +28,13 @@ sealed class RecordingAudio
     // A file this far from the recording's clock is worth telling the user about: the files are then out of step with
     // each other by enough to hear.
     private const double OutOfStepSeconds = 0.25;
+    // Windows' meter for an output device counts as playing from here up, and a part file as silent from here down:
+    // the gap between the two is what tells a device that plays nothing from one whose sound the loopback misses.
+    private const double DevicePlayingDb = -60;
+    private const double PartSilentDb = -80;
+    // Minutes of a device playing into a silent part file before the user is told; one minute can be a device that
+    // started to play as the minute ended.
+    private const int SilentPartMinutes = 2;
 
     private readonly SynchronizationContext _ui;
     private readonly AppSettings _settings;
@@ -38,6 +46,8 @@ sealed class RecordingAudio
     private readonly HashSet<AudioTrack> _reopening = [];
     // The output device each system audio part records, and its name.
     private readonly Dictionary<AudioTrack, (string DeviceId, string Name)> _loopbacks = [];
+    // Windows' own meters for those devices, read on every check.
+    private readonly Dictionary<AudioTrack, DeviceMeter> _meters = [];
     private long _start;
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = CheckMilliseconds };
     private AudioDeviceWatcher? _watcher;
@@ -178,7 +188,14 @@ sealed class RecordingAudio
                 return;
             }
             _devices.Add(device);
-            track.Use(track.OpenLoopback(device), $"everything played on {name}");
+            var capture = track.OpenLoopback(device);
+            track.Use(capture, $"everything played on {name}");
+            if (_meters.TryGetValue(track, out var meter))
+                meter.Use(device);
+            else
+                _meters[track] = new DeviceMeter(device);
+            Log?.Invoke($"{track.Label} ({track.FileName}): {name} plays {Describe(DeviceFormat(device))}, recorded as "
+                + Describe(capture.WaveFormat));
             if (_reopening.Remove(track))
                 Record(track, JournalEntry.TrackSource, $"everything played on {name} (recording again)");
         }
@@ -238,6 +255,8 @@ sealed class RecordingAudio
     {
         if (_stopping)
             return;
+        foreach (var meter in _meters.Values)
+            meter.Sample();
         if (++_ticks % (AlignmentLogSeconds * 1000 / CheckMilliseconds) == 0)
             LogAlignment();
         foreach (var track in _reopening.ToList())
@@ -363,7 +382,112 @@ sealed class RecordingAudio
     private void LogAlignment()
     {
         foreach (var track in _tracks)
-            Log?.Invoke($"{track.Label} ({track.FileName}) so far:"
-                + Environment.NewLine + AudioDevices.Indent(track.Alignment().Describe()));
+        {
+            var lines = track.Alignment().Describe().ToList();
+            if (_meters.TryGetValue(track, out var meter))
+                lines.AddRange(CheckDevicePlayed(track, meter));
+            Log?.Invoke($"{track.Label} ({track.FileName}) so far:" + Environment.NewLine + AudioDevices.Indent(lines));
+        }
+    }
+
+    /// <summary>
+    /// Compares what Windows says the device played over the last minute with what the part file recorded, and warns
+    /// while the recording still runs when the device plays and the file stays silent: the sound then reaches the
+    /// device by a path loopback can't hear, and the call's other side is being lost. Lines for the audio log.
+    /// </summary>
+    private List<string> CheckDevicePlayed(AudioTrack track, DeviceMeter meter)
+    {
+        string name = _loopbacks[track].Name;
+        var played = meter.TakeMinute();
+        double recorded = track.PeakSince();
+        if (played is not { } sound)
+            return [$"Windows' meter for {name} could not be read this minute; this file recorded {recorded:0.0} dBFS"];
+
+        string app = sound.App == null ? "no app's sound" : $"loudest app {sound.App} at {AudioDevices.Decibels(sound.AppPeak):0.0} dBFS";
+        double device = AudioDevices.Decibels(sound.Device);
+        var lines = new List<string> { $"Windows' meter for {name} this minute: {device:0.0} dBFS, {app}; this file recorded {recorded:0.0} dBFS" };
+        if (device < DevicePlayingDb || recorded > PartSilentDb)
+        {
+            meter.SilentMinutes = 0;
+            return lines;
+        }
+        meter.SilentMinutes++;
+        lines.Add($"{name} is playing but this file records silence ({meter.SilentMinutes} minute(s) so far)");
+        // A loopback stream that was opened while the device was being reconfigured can carry silence from then on,
+        // so try a fresh one on the same device before telling the user: it costs a gap of a few ms, and whether it
+        // helps says which kind of failure this is. Nothing to try while the stream is already down and retrying.
+        if (!meter.Reopened && !_reopening.Contains(track))
+        {
+            meter.Reopened = true;
+            Record(track, JournalEntry.Event, $"{name} plays sound that {track.FileName} can't hear (Windows' meter "
+                + $"reads {device:0.0} dBFS, {app}): recording it again from a fresh loopback of the same device.");
+            lines.Add("Opening this device's loopback again, to rule out a stream that stopped carrying its sound");
+            OpenLoopback(track);
+            return lines;
+        }
+        if (meter.SilentMinutes >= SilentPartMinutes && !meter.Warned)
+        {
+            meter.Warned = true;
+            string again = meter.Reopened ? ", even after opening its loopback again" : "";
+            Record(track, JournalEntry.Event, $"{name} plays sound that the recording can't hear{again}: Windows' meter "
+                + $"reads {device:0.0} dBFS ({app}) while {track.FileName} records silence. The sound reaches the device "
+                + "by a path this loopback can't hear.");
+            Warning?.Invoke($"{track.Label} is missing what {name} plays: Windows says it is playing ({device:0.0} dBFS) "
+                + $"but the recording hears silence{again}, so the other participants are not being recorded. Switch "
+                + "the meeting app's speaker to another device to record them.");
+        }
+        return lines;
+    }
+
+    private static WaveFormat? DeviceFormat(MMDevice device)
+    {
+        try
+        {
+            using var client = device.CreateAudioClient();
+            return client.MixFormat;
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static string Describe(WaveFormat? format) => format == null
+        ? "an unknown format"
+        : $"{format.SampleRate} Hz, {format.BitsPerSample}-bit {format.Encoding}, {format.Channels} ch";
+
+    /// <summary>Windows' own peak meters for one output device, read on every check and reported once a minute.</summary>
+    private sealed class DeviceMeter(MMDevice device)
+    {
+        private MMDevice _device = device;
+        private (float Device, AppProcess? App, float AppPeak)? _loudest;
+
+        /// <summary>Minutes in a row the device played while the part file recorded silence.</summary>
+        public int SilentMinutes { get; set; }
+
+        /// <summary>Whether this device's loopback has already been opened again over silence; once is enough.</summary>
+        public bool Reopened { get; set; }
+
+        /// <summary>Whether the user has been told about this device; once is enough per recording.</summary>
+        public bool Warned { get; set; }
+
+        /// <summary>Reads the meters of this device object from now on, keeping what has been seen so far.</summary>
+        public void Use(MMDevice reopened) => _device = reopened;
+
+        public void Sample()
+        {
+            if (AudioDevices.Playing(_device) is not { } now)
+                return;
+            if (_loudest is not { } best || now.Device > best.Device)
+                _loudest = now;
+        }
+
+        /// <summary>The loudest reading since the last call, and starts the next minute.</summary>
+        public (float Device, AppProcess? App, float AppPeak)? TakeMinute()
+        {
+            var loudest = _loudest;
+            _loudest = null;
+            return loudest;
+        }
     }
 }

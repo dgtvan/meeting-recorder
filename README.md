@@ -171,6 +171,15 @@ Everything about the audio is logged for investigating a recording afterwards:
 - README.md in the recording folder: the same for that recording, on the recording's clock.
 - `MeetingRecorder.exe --audio-status` prints every audio device with its state, default roles, volume and mute, which
   apps are playing or recording on it, and which microphone a recording would use now. It captures nothing.
+- Every minute, each system audio part also reports what Windows' own meter says the device played against what the
+  part file recorded, with the loudest app. A device that plays while its part file stays silent means the sound
+  isn't reaching the recording. After the first such minute the part's loopback is opened again on the same device
+  (a gap of a few ms), which recovers a stream that stopped carrying the device's sound; if the next minute is
+  silent too, the app warns while the recording still runs, so the meeting app's speaker can be switched to a
+  device that is recorded. Both the attempt and the warning go to audio.log and the recording's README.md.
+- `MeetingRecorder.exe --audio-probe [seconds]` compares the two live, second by second: per output device its format,
+  what a loopback capture hears, Windows' meter for the device, and each app's own session meter. It writes no files
+  and captures nothing, and is the quickest way to tell a silent device from one whose sound can't be captured.
 
 ## Window recording
 
