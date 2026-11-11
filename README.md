@@ -139,7 +139,7 @@ Supported apps: **Microsoft Teams** (new Teams).
 ### Supporting another meeting app
 
 Implement `IMeetingApp` (`src/MeetingRecorder/IMeetingApp.cs`): a stable `Id`, a `DisplayName`, how to tell the
-app is in a call (`IsCallActive`, usually `MeetingWindows.IsCapturingMicrophone` on its processes) and which windows
+app is in a call (`IsCallActive`, usually `MeetingWindows.HasActiveAudioSession` on its processes) and which windows
 show the meeting (`FindMeetingWindows`), plus `FindAppWindows` for the log. Add it to `MeetingApps.All`. The tray
 menu, the `AutoRecord` setting, recording, the per-call folder, `meetings.log` and `--meeting-status` all follow
 from that list. `TeamsMeetingApp` is the example.

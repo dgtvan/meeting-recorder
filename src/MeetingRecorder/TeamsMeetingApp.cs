@@ -1,11 +1,14 @@
+using NAudio.CoreAudioApi;
+
 namespace MeetingRecorder;
 
 /// <summary>
 /// Microsoft Teams (new Teams, <c>ms-teams.exe</c>): detects a call or meeting in progress and finds its windows.
 /// </summary>
 /// <remarks>
-/// A call is in progress while Teams holds an active microphone capture session. The meeting window is the separate
-/// Teams window titled "&lt;meeting&gt; | Microsoft Teams"; the main window's title starts with the section shown,
+/// A call is in progress while Teams holds the microphone, or plays sound with a meeting window open. The meeting
+/// window is the separate Teams window titled "&lt;meeting&gt; | Microsoft Teams"; the main window's title starts
+/// with the section shown,
 /// e.g. "Chat | &lt;chat name&gt; | Microsoft Teams", and the pre-join screen's with "Meeting join | ".
 /// </remarks>
 sealed class TeamsMeetingApp : IMeetingApp
@@ -26,7 +29,20 @@ sealed class TeamsMeetingApp : IMeetingApp
 
     public string DisplayName => "Microsoft Teams";
 
-    public bool IsCallActive() => MeetingWindows.IsCapturingMicrophone(MeetingWindows.ProcessIds(ProcessName));
+    /// <remarks>
+    /// Teams opens the microphone when a call starts (already on the pre-join screen) but closes it again while the
+    /// user is muted, so the microphone alone would end a call the moment they mute. The sound Teams plays says the
+    /// call is still on; on its own that would also catch a notification chime, so it only counts while a meeting
+    /// window is open, which Teams has only during a call.
+    /// </remarks>
+    public bool IsCallActive()
+    {
+        var processIds = MeetingWindows.ProcessIds(ProcessName);
+        if (MeetingWindows.HasActiveAudioSession(processIds, DataFlow.Capture))
+            return true;
+        return FindMeetingWindows(onScreenOnly: false).Count > 0
+            && MeetingWindows.HasActiveAudioSession(processIds, DataFlow.Render);
+    }
 
     /// <remarks>A second call (one on hold, or one being answered) has its own window.</remarks>
     public List<WindowInfo> FindMeetingWindows(bool onScreenOnly = true) =>

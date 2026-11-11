@@ -22,16 +22,18 @@ static class MeetingWindows
     }).ToHashSet();
 
     /// <summary>
-    /// True while one of the processes holds an active microphone capture session. Meeting apps open one only while
-    /// in a call (muting keeps it open) and close it when the call ends.
+    /// True while one of the processes holds an active audio session on a device of this kind: a microphone it
+    /// captures (<see cref="DataFlow.Capture"/>), or sound it plays (<see cref="DataFlow.Render"/>). A meeting app
+    /// opens the microphone when a call starts, but current Teams closes it again while the user is muted, so the
+    /// sound it plays is what says the call is still on.
     /// </summary>
-    public static bool IsCapturingMicrophone(HashSet<uint> processIds)
+    public static bool HasActiveAudioSession(HashSet<uint> processIds, DataFlow flow)
     {
         if (processIds.Count == 0)
             return false;
 
         using var enumerator = new MMDeviceEnumerator();
-        foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
+        foreach (var device in enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active))
         {
             using (device)
             {
