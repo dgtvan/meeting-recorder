@@ -66,7 +66,9 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
 - `MeetingRecorder.exe --audio-probe [seconds]` prints, per output device, its mix format, what our loopback capture
   hears, Windows' meter for the device and each app's session meter, second by second. Use it when system audio is
   silent to tell a device that played nothing from one whose sound loopback can't hear (the recorder logs the same
-  comparison once a minute, opens the loopback again after one silent minute and warns after the second). It writes nothing and captures nothing.
+  comparison every 2 s, opens a fresh loopback within about 6 s of a device playing into a silent file -- up to
+  5 times in a row, and again whenever the file has heard the device since -- and warns after two silent minutes).
+  It writes nothing and captures nothing.
 - `MeetingRecorder.exe --meeting-status [app id]` prints, per meeting app, whether a call is active and which windows
   auto-record would use, then an `app-window` block per visible window of the app (rect, topmost/owner/capture
   affinity, why it's skipped, and its button names via UI Automation) to tell the meeting window from sharing

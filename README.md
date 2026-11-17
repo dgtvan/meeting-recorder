@@ -154,8 +154,11 @@ speakerphone before or during a meeting changes nothing:
 - **System audio** records everything every output device plays (WASAPI loopback of each active speaker, headset and
   display), each into a part file that the finisher mixes into `audio-system`. Devices are checked every 2 s, so a
   Bluetooth headset or USB speakerphone plugged in during a meeting is recorded from then on, and one that is
-  unplugged and comes back is recorded again. Windows process loopback (recording one app, or every app but the
-  recorder) is not used: measured during a Teams call, it records none of the call's sound, only Teams' notification
+  unplugged and comes back is recorded again. A loopback stream can also stop carrying its device's sound without
+  failing -- the device is reconfigured underneath it and the stream delivers silence, or stops delivering at all,
+  while the device plays on -- so each part is checked against Windows' own meter for its device every 2 s and given
+  a fresh stream when it records nothing the device is playing. Windows process loopback (recording one app, or
+  every app but the recorder) is not used: measured during a Teams call, it records none of the call's sound, only Teams' notification
   sounds, while device loopback records the call.
 - **Microphone**, when automatic: the one the recorded program has open; else one another app has open; else the one
   being recorded while it's still connected; else the Windows default. It is checked every 2 s and on every device
@@ -173,12 +176,15 @@ Everything about the audio is logged for investigating a recording afterwards:
 - README.md in the recording folder: the same for that recording, on the recording's clock.
 - `MeetingRecorder.exe --audio-status` prints every audio device with its state, default roles, volume and mute, which
   apps are playing or recording on it, and which microphone a recording would use now. It captures nothing.
-- Every minute, each system audio part also reports what Windows' own meter says the device played against what the
-  part file recorded, with the loudest app. A device that plays while its part file stays silent means the sound
-  isn't reaching the recording. After the first such minute the part's loopback is opened again on the same device
-  (a gap of a few ms), which recovers a stream that stopped carrying the device's sound; if the next minute is
-  silent too, the app warns while the recording still runs, so the meeting app's speaker can be switched to a
-  device that is recorded. Both the attempt and the warning go to audio.log and the recording's README.md.
+- Every 2 s, each system audio part is compared with Windows' own meter for its device. A device that plays while
+  the part records nothing means the sound isn't reaching the recording, and after three such checks (about 6 s) the
+  part's loopback is opened again on the same device (a gap of about 0.1 s), which recovers a stream that stopped
+  carrying the device's sound. That is tried up to 5 times in a row, and the count starts over as soon as the part
+  hears the device again, so a device that goes quiet repeatedly is always recovered.
+- Every minute, each part also reports what the meter said the device played against what the part recorded, with
+  the loudest app. If a part is still silent after two such minutes -- the failure a new stream can't fix -- the app
+  warns while the recording still runs, so the meeting app's speaker can be switched to a device that is recorded.
+  Every attempt and the warning go to audio.log and the recording's README.md.
 - What those meters saw over the whole recording is kept per device (README.md's timeline, `recording.json`'s
   `playback`), and it decides what a silent system audio file means: a device that played nothing all along makes the
   silence right, while a device that played while the file stayed silent is a call whose other side was lost.

@@ -41,6 +41,14 @@ sealed class RecordingAudio
     // Minutes of a device playing into a silent part file before the user is told; one minute can be a device that
     // started to play as the minute ended.
     private const int SilentPartMinutes = 2;
+    // Checks in a row with Windows' meter saying the device plays while the part file records nothing, before a fresh
+    // loopback is opened: long enough that a quiet moment in a call can't trigger it, short enough to lose a few
+    // seconds of the call rather than the rest of the meeting.
+    private const int DeadChecks = 3;
+    // Fresh loopbacks in a row without the part file hearing anything again. Past this the stream isn't the problem:
+    // the sound reaches the device by a path loopback can't hear, which the per-minute report warns about. The count
+    // starts over as soon as the file hears the device again, so a device that hiccups repeatedly is always recovered.
+    private const int MaxReopens = 5;
 
     private readonly SynchronizationContext _ui;
     private readonly AppSettings _settings;
@@ -263,6 +271,7 @@ sealed class RecordingAudio
             return;
         foreach (var meter in _meters.Values)
             meter.Sample();
+        CheckLoopbacksAlive();
         if (++_ticks % (AlignmentLogSeconds * 1000 / CheckMilliseconds) == 0)
             LogAlignment();
         foreach (var track in _reopening.ToList())
@@ -407,6 +416,55 @@ sealed class RecordingAudio
     }
 
     /// <summary>
+    /// Checks on every tick that each system audio part still carries what its output device plays, and opens a fresh
+    /// loopback on the same device when it doesn't. A loopback stream can stop carrying a device's sound without
+    /// failing: the device is reconfigured underneath it (a headset's own software engaging for a call, a format
+    /// change), and the stream then delivers silence, or stops delivering at all, while the device plays on. Nothing
+    /// is raised for it, so only Windows' own meter for the device can tell that apart from a device that plays
+    /// nothing. Measured on a meeting watched in a browser tab: three seconds of the call were recorded and the rest
+    /// was silence, the stream having stopped delivering altogether a third of the way in.
+    /// </summary>
+    private void CheckLoopbacksAlive()
+    {
+        foreach (var track in _loopbacks.Keys.ToList())
+        {
+            if (!_meters.TryGetValue(track, out var meter))
+                continue;
+            var (delivered, peak) = track.Delivered();
+            // Nothing to judge while the stream is down and already being retried on every check.
+            if (_reopening.Contains(track))
+            {
+                meter.Strikes = 0;
+                continue;
+            }
+            // A fresh stream that carries the device's sound again has done its job, and the next failure gets its
+            // own attempts; a device that falls quiet proves nothing either way, so it leaves the count alone.
+            bool heard = delivered > 0 && peak > PartSilentDb;
+            if (heard)
+                meter.Reopens = 0;
+            // A device that plays nothing delivers nothing: only sound the file misses means a dead stream.
+            if (heard || meter.LastDb < DevicePlayingDb)
+            {
+                meter.Strikes = 0;
+                continue;
+            }
+            if (++meter.Strikes < DeadChecks)
+                continue;
+            meter.Strikes = 0;
+            if (meter.Reopens >= MaxReopens)
+                continue;
+            meter.Reopens++;
+            meter.ReopenCount++;
+            string name = _loopbacks[track].Name;
+            string missing = delivered == 0 ? "has stopped delivering audio" : $"delivers silence ({peak:0.0} dBFS)";
+            Record(track, JournalEntry.Event, $"{name} plays sound (Windows' own meter reads {meter.LastDb:0.0} dBFS) "
+                + $"that {track.FileName} {missing}: recording it again from a fresh loopback of the same device "
+                + $"(attempt {meter.ReopenCount}).");
+            OpenLoopback(track);
+        }
+    }
+
+    /// <summary>
     /// Compares what Windows says the device played over the last minute with what the part file recorded, and warns
     /// while the recording still runs when the device plays and the file stays silent: the sound then reaches the
     /// device by a path loopback can't hear, and the call's other side is being lost. Lines for the audio log.
@@ -430,22 +488,15 @@ sealed class RecordingAudio
         }
         meter.SilentMinutes++;
         lines.Add($"{name} is playing but this file records silence ({meter.SilentMinutes} minute(s) so far)");
-        // A loopback stream that was opened while the device was being reconfigured can carry silence from then on,
-        // so try a fresh one on the same device before telling the user: it costs a gap of a few ms, and whether it
-        // helps says which kind of failure this is. Nothing to try while the stream is already down and retrying.
-        if (!meter.Reopened && !_reopening.Contains(track))
-        {
-            meter.Reopened = true;
-            Record(track, JournalEntry.Event, $"{name} plays sound that {track.FileName} can't hear (Windows' meter "
-                + $"reads {device:0.0} dBFS, {app}): recording it again from a fresh loopback of the same device.");
-            lines.Add("Opening this device's loopback again, to rule out a stream that stopped carrying its sound");
-            OpenLoopback(track);
-            return lines;
-        }
+        // A stream that stopped carrying the device's sound has already been given fresh loopbacks by
+        // CheckLoopbacksAlive, seconds after it went quiet. A minute of silence after that is the other kind of
+        // failure, one a new stream can't fix, and it is the user's to act on.
         if (meter.SilentMinutes >= SilentPartMinutes && !meter.Warned)
         {
             meter.Warned = true;
-            string again = meter.Reopened ? ", even after opening its loopback again" : "";
+            string again = meter.ReopenCount > 0
+                ? $", even after opening its loopback again {meter.ReopenCount} time(s)"
+                : "";
             Record(track, JournalEntry.Event, $"{name} plays sound that the recording can't hear{again}: Windows' meter "
                 + $"reads {device:0.0} dBFS ({app}) while {track.FileName} records silence. The sound reaches the device "
                 + "by a path this loopback can't hear.");
@@ -482,8 +533,17 @@ sealed class RecordingAudio
         /// <summary>Minutes in a row the device played while the part file recorded silence.</summary>
         public int SilentMinutes { get; set; }
 
-        /// <summary>Whether this device's loopback has already been opened again over silence; once is enough.</summary>
-        public bool Reopened { get; set; }
+        /// <summary>Checks in a row with the device playing while the part file recorded nothing.</summary>
+        public int Strikes { get; set; }
+
+        /// <summary>Fresh loopbacks opened since the part file last heard this device; it stops trying past MaxReopens.</summary>
+        public int Reopens { get; set; }
+
+        /// <summary>Fresh loopbacks opened over the whole recording, for the messages.</summary>
+        public int ReopenCount { get; set; }
+
+        /// <summary>Windows' meter for the device at the last check (dBFS), -100 when it couldn't be read.</summary>
+        public double LastDb { get; private set; } = -100;
 
         /// <summary>Whether the user has been told about this device; once is enough per recording.</summary>
         public bool Warned { get; set; }
@@ -516,7 +576,12 @@ sealed class RecordingAudio
         public void Sample()
         {
             if (AudioDevices.Playing(_device) is not { } now)
+            {
+                // A reading that can't be taken says nothing about the device, and must not pass for sound played.
+                LastDb = -100;
                 return;
+            }
+            LastDb = AudioDevices.Decibels(now.Device);
             if (_loudest is not { } best || now.Device > best.Device)
                 _loudest = now;
         }

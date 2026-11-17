@@ -46,6 +46,8 @@ sealed class AudioTrack
     private long _soundFrames;
     private int _peak;
     private int _peakSince;
+    private long _checkFrames;
+    private int _checkPeak;
     private long? _stopTicks;
     private bool _closed;
     private readonly AlignmentLog _alignment = new();
@@ -153,6 +155,21 @@ sealed class AudioTrack
     }
 
     /// <summary>
+    /// What the source delivered since the last call: frames, counting silence the source itself delivered, and the
+    /// loudest moment in them (dBFS). Read on every check to tell a live source from one that has gone silent or
+    /// stopped delivering altogether; <see cref="PeakSince"/> is the same question over a minute, for the reports.
+    /// </summary>
+    public (long Frames, double PeakDb) Delivered()
+    {
+        lock (_sync)
+        {
+            var delivered = (_checkFrames, Decibels(_checkPeak));
+            (_checkFrames, _checkPeak) = (0, 0);
+            return delivered;
+        }
+    }
+
+    /// <summary>
     /// The loudest moment (dBFS) written since the last call, for the per-minute reports; a file that is recording
     /// silence reads -100 however loud it was before.
     /// </summary>
@@ -195,6 +212,7 @@ sealed class AudioTrack
             bool timestamped = qpcPosition > 0 && (flags & AudioClientBufferFlags.TimestampError) == 0;
             _alignment.Packet(timestamped, (flags & AudioClientBufferFlags.DataDiscontinuity) != 0,
                 (flags & AudioClientBufferFlags.Silent) != 0, frames);
+            _checkFrames += frames;
 
             long expectedStart;
             if (timestamped)
@@ -266,6 +284,7 @@ sealed class AudioTrack
             _soundFrames += frames;
         _peak = Math.Max(_peak, peak);
         _peakSince = Math.Max(_peakSince, peak);
+        _checkPeak = Math.Max(_checkPeak, peak);
         int minute = (int)(_framesWritten / (SampleRate * 60L));
         while (_minutePeaks.Count <= minute)
             _minutePeaks.Add(0);
