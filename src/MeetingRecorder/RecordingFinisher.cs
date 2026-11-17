@@ -26,8 +26,9 @@ static class RecordingFinisher
     public const string ManifestFileName = "recording.json";
 
     /// <summary>
-    /// A call whose microphone has at least this much sound while the system audio has less than
-    /// <see cref="OneSidedSystemSeconds"/> recorded only one side: the other participants are missing.
+    /// A recording whose microphone has at least this much sound while the system audio has less than
+    /// <see cref="OneSidedSystemSeconds"/> heard one side only; <see cref="SystemSilence"/> says whether that means
+    /// the other participants were lost or that nothing was played on the PC at all.
     /// </summary>
     private const double OneSidedMicSeconds = 30;
     private const double OneSidedSystemSeconds = 5;
@@ -114,6 +115,8 @@ static class RecordingFinisher
         public List<string> Parts { get; } = [];
         /// <summary>Where each file that went into this one sat on the recording's clock, one per part.</summary>
         public List<AlignmentReport> Alignments { get; } = [];
+        /// <summary>What Windows' meters said each part's output device played, one per part.</summary>
+        public List<PlaybackReport> Playbacks { get; } = [];
         public TimeSpan Length => TimeSpan.FromTicks((End ?? Start) - Start);
     }
 
@@ -169,6 +172,8 @@ static class RecordingFinisher
                     stopped.Stats = entry;
                     if (entry.Alignment is { } trackAlignment)
                         stopped.Alignments.Add(trackAlignment);
+                    if (entry.Playback is { Minutes: > 0 } trackPlayback)
+                        stopped.Playbacks.Add(trackPlayback);
                     break;
                 case JournalEntry.ShareEnd when videos.LastOrDefault(v => v.File == entry.File) is { } share:
                     share.ShareEnd ??= entry.Qpc;
@@ -207,11 +212,11 @@ static class RecordingFinisher
         var recording = entries.FirstOrDefault(e => e.Kind == JournalEntry.Recording);
         var system = tracks.FirstOrDefault(t => t.Kind == "system");
         var microphone = tracks.FirstOrDefault(t => t.Kind == "mic");
-        if (OneSided(system, microphone) is { } oneSided)
+        if (SystemSilence(system, microphone) is { } silence)
         {
-            notes.Add(oneSided);
-            if (auto)
-                report("warning", $"{Path.GetFileName(folder)}: {oneSided}");
+            notes.Add(silence.Note);
+            if (auto && silence.Warn)
+                report("warning", $"{Path.GetFileName(folder)}: {silence.Note}");
         }
         if (system != null || microphone != null)
         {
@@ -425,6 +430,8 @@ static class RecordingFinisher
                 main.Stats = Merge(main.Stats, other.Stats);
                 if (other.Stats?.Alignment is { } alignment)
                     main.Alignments.Add(alignment);
+                if (other.Stats?.Playback is { Minutes: > 0 } playback)
+                    main.Playbacks.Add(playback);
                 tracks.Remove(other);
             }
         }
@@ -449,8 +456,9 @@ static class RecordingFinisher
             SoundSeconds = Math.Max(a.SoundSeconds ?? 0, b.SoundSeconds ?? 0),
             PeakDb = Math.Max(a.PeakDb ?? -100, b.PeakDb ?? -100),
             MinutePeaks = minutes,
-            // Each part keeps its own alignment: one file's place on the clock says nothing about another's.
+            // Each part keeps its own alignment and meter report: one file's clock and device say nothing about another's.
             Alignment = null,
+            Playback = null,
             Details = Join(a.Details, b.Details),
         };
     }
@@ -659,15 +667,30 @@ static class RecordingFinisher
         return text.ToString();
     }
 
-    /// <summary>Why the recording holds only one side of a call, or null when both sides have sound.</summary>
-    private static string? OneSided(Track? system, Track? microphone)
+    /// <summary>
+    /// What it means that the microphone has speech while the system audio is silent: a note for README.md, and
+    /// whether the user must act on it. Windows' own meters decide which it is. A device that played nothing for the
+    /// whole recording makes the silence right: nobody was on the far end, everyone heard was in the room and is on
+    /// the microphone, and warning about it would be wrong. A device that did play while the file stayed silent is a
+    /// call whose other side was lost. Null when both sides have sound.
+    /// </summary>
+    private static (string Note, bool Warn)? SystemSilence(Track? system, Track? microphone)
     {
         if (system?.Stats?.SoundSeconds is not { } heard || microphone?.Stats?.SoundSeconds is not { } spoken)
             return null;
-        return spoken >= OneSidedMicSeconds && heard < OneSidedSystemSeconds
-            ? $"Only one side was recorded: the microphone has {Duration(TimeSpan.FromSeconds(spoken))} of sound but the "
-              + $"system audio only {heard:0} s, so what the other participants said is missing."
-            : null;
+        if (spoken < OneSidedMicSeconds || heard >= OneSidedSystemSeconds)
+            return null;
+        string silent = $"the microphone has {Duration(TimeSpan.FromSeconds(spoken))} of sound but the system audio only {heard:0} s";
+        var played = system.Playbacks;
+        if (played.Count > 0 && played.All(p => p.NothingPlayed))
+            return ($"Nothing was played on this PC: {silent}, and Windows' own meters saw no sound on "
+                + $"{string.Join(", ", played.Select(p => p.Device))} in any of the {played.Max(p => p.Minutes)} minute(s) "
+                + "checked. So nothing is missing from the recording: everyone heard was in the room, on the microphone.", false);
+        string cause = played.FirstOrDefault(p => p.UnheardMinutes > 0) is { } unheard
+            ? $" Windows' meters saw {unheard.Device} playing in {unheard.UnheardMinutes} of {unheard.Minutes} minute(s) "
+              + "while this recording heard silence, so its sound reached the device by a path the loopback can't hear."
+            : "";
+        return ($"Only one side was recorded: {silent}, so what the other participants said is missing.{cause}", true);
     }
 
     private static readonly JsonSerializerOptions ManifestOptions = new()
@@ -721,6 +744,8 @@ static class RecordingFinisher
                 Silent = track.Stats?.SoundSeconds is { } seconds ? seconds < 1 : (bool?)null,
                 MinutePeaksDb = track.Stats?.MinutePeaks,
                 Alignment = track.Alignments,
+                // What Windows said each device played, so an analysis can tell silence that is right from a lost call.
+                Playback = track.Playbacks.Count > 0 ? track.Playbacks : null,
                 Sources = track.Sources.Select(e => new { AtSeconds = At(e.Qpc), Text = e.Text, Details = e.Details }).ToList(),
             });
         var manifest = new

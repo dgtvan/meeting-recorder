@@ -34,6 +34,10 @@ account), don't deploy: run `build.cmd /quiet` instead and ask the user to run `
   files that drift apart play as an echo in the mixed video sound. Where each file sits on the clock and every
   correction made goes to `audio.log` once a minute and to README.md/`recording.json` (`AlignmentReport`) at the
   end; a file ending more than 0.25 s off raises a warning.
+- Windows' own meters are the reference for what a system audio file should hold (`PlaybackReport`, per device, in
+  README.md/`recording.json`): a silent file whose devices played nothing all recording is right (an in-room meeting
+  plays nothing on the PC), and only a device that played while the file stayed silent means the call's other side
+  was lost. Both say so in README.md's notes; only the second warns (`RecordingFinisher.SystemSilence`).
 - Auto-record is per meeting app: each `IMeetingApp` in `MeetingApps.All` gets an `AutoRecorder` (call detection,
   per-call folder, tidy-up, `meetings.log`). App-specific detection belongs in the `IMeetingApp`, not in the tray.
 - Screen share: `IMeetingApp.FindShare` (Teams: its `ScreenBorderWindow`) finds what is shared; `AutoRecorder` records

@@ -61,7 +61,9 @@ It's raised when:
   recorded minute to save); a meeting window that fails in an auto-recorded call's first 30 s is raised only once the
   call lasts longer, since Teams briefly shows a call's window again just after it ends;
 - an auto-recorded call has only one side: the microphone has sound but the system audio is (nearly) silent, so the
-  other participants are missing (README.md says so too);
+  other participants are missing (README.md says so too). Not when Windows' own meters saw no sound on any output
+  device for the whole recording: nothing was played, so nothing was lost (everyone was in the room, on the
+  microphone) and README.md says that instead;
 - system audio or the microphone can't be recorded (system audio is retried every 2 s), or the
   microphone chosen in the menu is missing and the one in use is recorded instead (a microphone that is unplugged
   while recorded automatically is just replaced; that is logged, not a warning);
@@ -177,6 +179,9 @@ Everything about the audio is logged for investigating a recording afterwards:
   (a gap of a few ms), which recovers a stream that stopped carrying the device's sound; if the next minute is
   silent too, the app warns while the recording still runs, so the meeting app's speaker can be switched to a
   device that is recorded. Both the attempt and the warning go to audio.log and the recording's README.md.
+- What those meters saw over the whole recording is kept per device (README.md's timeline, `recording.json`'s
+  `playback`), and it decides what a silent system audio file means: a device that played nothing all along makes the
+  silence right, while a device that played while the file stayed silent is a call whose other side was lost.
 - `MeetingRecorder.exe --audio-probe [seconds]` compares the two live, second by second: per output device its format,
   what a loopback capture hears, Windows' meter for the device, and each app's own session meter. It writes no files
   and captures nothing, and is the quickest way to tell a silent device from one whose sound can't be captured.

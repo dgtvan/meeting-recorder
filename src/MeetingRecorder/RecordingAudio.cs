@@ -32,6 +32,12 @@ sealed class RecordingAudio
     // the gap between the two is what tells a device that plays nothing from one whose sound the loopback misses.
     private const double DevicePlayingDb = -60;
     private const double PartSilentDb = -80;
+    /// <summary>
+    /// Below this, Windows' meter saw no sound at all on the device over a minute, rather than quiet sound: a system
+    /// audio file that stayed silent while every device read this low recorded the silence that was really played, so
+    /// nothing was lost (an in-room meeting plays nothing on the PC).
+    /// </summary>
+    public const double DeviceSilentDb = -90;
     // Minutes of a device playing into a silent part file before the user is told; one minute can be a device that
     // started to play as the minute ended.
     private const int SilentPartMinutes = 2;
@@ -355,15 +361,25 @@ sealed class RecordingAudio
         {
             var (sound, peak, minutes) = track.Statistics();
             var alignment = track.Alignment();
+            // Why a silent file is silent only shows next to Windows' own meters, so the report travels with it.
+            var playback = _meters.TryGetValue(track, out var tracked) ? tracked.Report(_loopbacks[track].Name) : null;
+            string? played = playback is { Minutes: > 0 } ? playback.Describe() : null;
+            // A clean file needs no alignment bullets in README.md, but why it is silent still belongs there.
+            List<string> details = alignment.Clean ? [] : alignment.Describe();
+            if (played != null)
+                details.Add(played);
+            var logLines = alignment.Describe();
+            if (played != null)
+                logLines.Add(played);
             _journal.Write(new JournalEntry
             {
                 Kind = JournalEntry.TrackEnd, Track = track.Kind, File = track.FileName,
                 SoundSeconds = Math.Round(sound, 1), PeakDb = peak, MinutePeaks = minutes,
-                Alignment = alignment, Details = alignment.Clean ? null : alignment.Describe(),
+                Alignment = alignment, Playback = playback, Details = details.Count > 0 ? details : null,
             });
             Log?.Invoke($"{track.Label} ({track.FileName}) ended: sound in {sound:0} s, loudest {peak:0.0} dBFS, "
                 + $"{alignment.RecordedSeconds:0.##} s of audio in {alignment.Packets} packets."
-                + Environment.NewLine + AudioDevices.Indent(alignment.Describe()));
+                + Environment.NewLine + AudioDevices.Indent(logLines));
             // The sound of the recording is only as good as its files lining up; say so rather than leave it to be
             // noticed as an echo in the video's sound.
             if (Math.Abs(alignment.OffsetSeconds) > OutOfStepSeconds)
@@ -405,6 +421,7 @@ sealed class RecordingAudio
 
         string app = sound.App == null ? "no app's sound" : $"loudest app {sound.App} at {AudioDevices.Decibels(sound.AppPeak):0.0} dBFS";
         double device = AudioDevices.Decibels(sound.Device);
+        meter.Count(device, AudioDevices.Decibels(sound.AppPeak), playing: device >= DevicePlayingDb, unheard: device >= DevicePlayingDb && recorded <= PartSilentDb);
         var lines = new List<string> { $"Windows' meter for {name} this minute: {device:0.0} dBFS, {app}; this file recorded {recorded:0.0} dBFS" };
         if (device < DevicePlayingDb || recorded > PartSilentDb)
         {
@@ -471,8 +488,30 @@ sealed class RecordingAudio
         /// <summary>Whether the user has been told about this device; once is enough per recording.</summary>
         public bool Warned { get; set; }
 
+        private int _minutes;
+        private int _playingMinutes;
+        private int _unheardMinutes;
+        private double _loudestDb = -100;
+        private double _loudestAppDb = -100;
+
         /// <summary>Reads the meters of this device object from now on, keeping what has been seen so far.</summary>
         public void Use(MMDevice reopened) => _device = reopened;
+
+        /// <summary>Keeps one minute's comparison, for the report the recording ends with.</summary>
+        public void Count(double deviceDb, double appDb, bool playing, bool unheard)
+        {
+            _minutes++;
+            if (playing)
+                _playingMinutes++;
+            if (unheard)
+                _unheardMinutes++;
+            _loudestDb = Math.Max(_loudestDb, deviceDb);
+            _loudestAppDb = Math.Max(_loudestAppDb, appDb);
+        }
+
+        /// <summary>What Windows' meters said this device played over the whole recording.</summary>
+        public PlaybackReport Report(string name) =>
+            new(name, _minutes, _playingMinutes, _unheardMinutes, Math.Round(_loudestDb, 1), Math.Round(_loudestAppDb, 1));
 
         public void Sample()
         {

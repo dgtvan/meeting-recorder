@@ -47,7 +47,33 @@ sealed record JournalEntry
     public double[]? MinutePeaks { get; init; }
     /// <summary>Where a track's file ended up on the recording's clock and what it took to keep it there.</summary>
     public AlignmentReport? Alignment { get; init; }
+    /// <summary>What Windows' own meters said the output device played while a system audio part recorded it.</summary>
+    public PlaybackReport? Playback { get; init; }
     public string? Error { get; init; }
+}
+
+/// <summary>
+/// What Windows' own meters said one output device played over a recording, next to what the system audio part file
+/// recorded from it. It tells silence that is right (nothing was played, e.g. everyone was in the room) from silence
+/// that lost the call: the device played and the loopback couldn't hear it.
+/// </summary>
+/// <param name="Device">The device's name.</param>
+/// <param name="Minutes">Minutes of the recording whose meter readings were compared with the file.</param>
+/// <param name="PlayingMinutes">Of those, the minutes Windows' meter showed the device playing.</param>
+/// <param name="UnheardMinutes">Of those, the minutes the device played while the file recorded silence.</param>
+/// <param name="LoudestDb">The loudest the device's meter read, -100 for a device that played nothing at all.</param>
+/// <param name="LoudestAppDb">The loudest any one app's own meter on the device read.</param>
+sealed record PlaybackReport(string Device, int Minutes, int PlayingMinutes, int UnheardMinutes, double LoudestDb, double LoudestAppDb)
+{
+    /// <summary>Windows' meters saw no sound at all on this device: there was nothing for the file to record.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool NothingPlayed => Minutes > 0 && LoudestDb < RecordingAudio.DeviceSilentDb;
+
+    /// <summary>One line per fact, for the log, the journal and README.md.</summary>
+    public string Describe() => NothingPlayed
+        ? $"Windows' own meters saw no sound on {Device} in any of the {Minutes} minute(s) checked, so this file's silence is the device's"
+        : $"Windows' own meters saw {Device} playing in {PlayingMinutes} of {Minutes} minute(s) checked, loudest {LoudestDb:0.0} dBFS"
+          + (UnheardMinutes > 0 ? $"; in {UnheardMinutes} of them this file recorded silence" : "");
 }
 
 /// <summary>
