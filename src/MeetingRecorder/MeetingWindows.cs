@@ -90,9 +90,11 @@ static class MeetingWindows
 
     /// <summary>
     /// The display or window whose bounds match what a meeting app marks as shared: a whole display, else the top
-    /// window (of another app) whose frame matches within a few pixels; null when nothing matches.
+    /// window whose frame matches within a few pixels; null when nothing matches. That can be a window of the meeting
+    /// app itself (sharing Teams' main window); its own sharing toolbars and share border are hidden from capture,
+    /// so they never match.
     /// </summary>
-    public static RecordingTarget? SharedTarget(Rectangle shared, HashSet<uint> appProcessIds)
+    public static RecordingTarget? SharedTarget(Rectangle shared)
     {
         if (Screen.AllScreens.FirstOrDefault(screen => Near(screen.Bounds, shared, 2)) is { } display)
             return RecordingTarget.ForDisplay(display.DeviceName) with { Name = "shared screen", IsShare = true };
@@ -102,7 +104,7 @@ static class MeetingWindows
         EnumWindows((hwnd, _) =>
         {
             GetWindowThreadProcessId(hwnd, out uint processId);
-            if (!IsWindowVisible(hwnd) || processId == ownProcessId || appProcessIds.Contains(processId) || NotShownReason(hwnd) != null
+            if (!IsWindowVisible(hwnd) || processId == ownProcessId || NotShownReason(hwnd) != null
                 || FrameBounds(hwnd) is not { } frame || !Near(frame, shared, ShareTolerance))
                 return true;
             string title = Title(hwnd);

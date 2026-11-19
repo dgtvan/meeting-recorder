@@ -122,7 +122,7 @@ sealed class TeamsMeetingApp : IMeetingApp
         {
             if (MeetingWindows.ClassName(hwnd) == ShareBorderClass && MeetingWindows.Bounds(hwnd) is { } bounds
                 && !MeetingWindows.IsTiny(bounds))
-                return new SharedContent(bounds, MeetingWindows.SharedTarget(bounds, processIds));
+                return new SharedContent(bounds, MeetingWindows.SharedTarget(bounds));
         }
         return null;
     }
