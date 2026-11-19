@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Automation;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 
@@ -125,6 +126,32 @@ static class MeetingWindows
 
     public static Rectangle? Bounds(IntPtr hwnd) =>
         GetWindowRect(hwnd, out RECT r) ? Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom) : null;
+
+    /// <summary>
+    /// Whether the window has a control with this UI Automation id (an id the app's developers set, which stays the
+    /// same whatever the window's title or the UI language), or null when that couldn't be read in time.
+    /// </summary>
+    public static bool? HasControl(IntPtr hwnd, string automationId, TimeSpan timeout)
+    {
+        int found = -1;
+        // UI Automation can hang on a busy window; the thread is abandoned when it does.
+        var reader = new Thread(() =>
+        {
+            try
+            {
+                bool has = AutomationElement.FromHandle(hwnd).FindFirst(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, automationId)) != null;
+                Volatile.Write(ref found, has ? 1 : 0);
+            }
+            catch (Exception ex) when (ex is ElementNotAvailableException or COMException or InvalidOperationException or ArgumentException)
+            {
+            }
+        }) { IsBackground = true };
+        reader.SetApartmentState(ApartmentState.MTA);
+        reader.Start();
+        reader.Join(timeout);
+        return Volatile.Read(ref found) switch { 1 => true, 0 => false, _ => null };
+    }
 
     public static string Title(IntPtr hwnd)
     {

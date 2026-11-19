@@ -106,8 +106,11 @@ during the call and one set of audio files:
 Supported apps: **Microsoft Teams** (new Teams).
 
 - **Start:** the app has been using a microphone for about 5 s (meeting apps do so only during a call, even while
-  muted) and a meeting window is open (for Teams, the separate window titled "*meeting name* | Microsoft Teams"). A
-  meeting window that opens later during the call is recorded into the same folder.
+  muted) and a meeting window is open. For Teams that's the separate window with the call's Leave button, found by
+  the button's built-in id, so it doesn't depend on the window's title or the UI language; its title ("*meeting
+  name* | Microsoft Teams", with your organization first in a meeting organized by someone from another
+  organization) only names the recording, and decides only when the button can't be read. A meeting window that
+  opens later during the call is recorded into the same folder.
 - **Stop:** a window's video stops within about 3 s of the window closing. The call stops once no meeting window
   has been open for about 3–6 s (the app closes them as the call ends), or about 12 s after the app stops using the
   microphone.
