@@ -68,6 +68,7 @@ sealed class RecordingProcess
                 CreateNoWindow = true,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
+                StandardOutputEncoding = ChildOutput.Encoding,
             },
             EnableRaisingEvents = true,
         };

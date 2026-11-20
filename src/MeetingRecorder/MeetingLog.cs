@@ -57,6 +57,7 @@ sealed class MeetingLog(IMeetingApp app)
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
+                StandardOutputEncoding = ChildOutput.Encoding,
             },
             EnableRaisingEvents = true,
         };

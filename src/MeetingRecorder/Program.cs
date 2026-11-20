@@ -1,4 +1,12 @@
+using System.Text;
+
 namespace MeetingRecorder;
+
+/// <summary>How child processes (recorder, finisher, window snapshots) write the lines the tray reads.</summary>
+static class ChildOutput
+{
+    public static readonly Encoding Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+}
 
 static class Program
 {
@@ -10,6 +18,10 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        // Child processes answer the tray over stdout; the console's code page would turn characters outside it (a
+        // zero-width space in Edge's window title, Vietnamese names) into '?', and the tray then can't find the folder.
+        if (Console.IsOutputRedirected)
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), ChildOutput.Encoding) { AutoFlush = true });
         if (args.Length > 0 && args[0] == RecorderWorker.Flag)
         {
             ApplicationConfiguration.Initialize();

@@ -477,7 +477,9 @@ sealed class RecordingSession
     private static string SanitizeFileName(string name)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        var chars = name.Select(c => invalid.Contains(c) ? ' ' : c).ToArray();
+        // Invisible characters (Edge puts a zero-width space in "Microsoft Edge") make a folder name you can't type.
+        var chars = name.Where(c => char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format)
+            .Select(c => invalid.Contains(c) ? ' ' : c).ToArray();
         string cleaned = string.Join(' ', new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries));
         if (cleaned.Length > 60)
             cleaned = cleaned[..60];

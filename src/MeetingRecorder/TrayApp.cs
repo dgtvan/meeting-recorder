@@ -612,6 +612,9 @@ sealed class TrayApp : ApplicationContext, IAutoRecordHost
         // Whatever was saved, even of a failed recording, gets its sound and README.md.
         if (session.FolderPath != null && Directory.Exists(session.FolderPath))
             StartFinishing(session.FolderPath, auto: false, null, session.CapturedFor ?? TimeSpan.Zero, session.EndNote);
+        else if (session.FolderPath != null)
+            AddProblem($"Could not finish saving {session.FolderPath}: the folder wasn't found. The video may not play to "
+                + "the end until it's finished; the app finishes it the next time it starts.");
         ExitIfDone();
     }
 
